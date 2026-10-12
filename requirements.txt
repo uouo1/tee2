@@ -1,0 +1,6 @@
+# Argos runs on the Python standard library alone: the server, search,
+# valuation, HTML export and web UI need nothing installed.
+#
+# These are optional and only widen the export menu:
+python-pptx>=1.0   # PowerPoint export (argos export --format pptx)
+reportlab>=4.0     # PDF export       (argos export --format pdf)

@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Argos — Research &amp; Pitch Books</title>
+<link rel="stylesheet" href="/tokens.css">
+<link rel="stylesheet" href="/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%232a78d6'/><path d='M8 22 L13 10 L18 22' stroke='white' stroke-width='2.4' fill='none' stroke-linejoin='round'/><line x1='21' y1='10' x2='21' y2='22' stroke='white' stroke-width='2.4'/></svg>">
+</head>
+<body class="viz">
+<a class="skip" href="#main">Skip to content</a>
+<header class="topbar">
+  <div class="brand">
+    <span class="mark" aria-hidden="true">
+      <svg viewBox="0 0 32 32" width="26" height="26"><rect width="32" height="32" rx="7" fill="var(--series-1)"/><path d="M8 22 L13 10 L18 22" stroke="#fff" stroke-width="2.4" fill="none" stroke-linejoin="round"/><line x1="21" y1="10" x2="21" y2="22" stroke="#fff" stroke-width="2.4"/></svg>
+    </span>
+    <div>
+      <strong>Argos</strong>
+      <span class="tagline">Research intelligence &amp; pitch books</span>
+    </div>
+  </div>
+  <nav class="tabs" aria-label="Sections">
+    <button class="tab" data-route="dashboard" aria-current="page">Dashboard</button>
+    <button class="tab" data-route="research">Research</button>
+    <button class="tab" data-route="companies">Companies</button>
+    <button class="tab" data-route="pitchbooks">Pitch books</button>
+    <button class="tab" data-route="monitor">Monitor</button>
+  </nav>
+  <div class="topbar-actions">
+    <span id="corpus-stamp" class="stamp" title="Corpus coverage"></span>
+    <button id="theme-toggle" class="ghost" type="button" aria-label="Switch colour theme">Theme</button>
+  </div>
+</header>
+
+<main id="main" tabindex="-1">
+  <!-- Dashboard -->
+  <section class="view" id="view-dashboard" hidden>
+    <div class="view-head">
+      <h1>Dashboard</h1>
+      <p class="muted" id="dashboard-sub">Corpus coverage, tone and what is emerging.</p>
+    </div>
+    <div class="tiles" id="dashboard-tiles"></div>
+    <div class="panel-grid">
+      <div class="panel"><div id="dashboard-sentiment" class="chart-slot"></div></div>
+      <div class="panel"><div id="dashboard-volume" class="chart-slot"></div></div>
+    </div>
+    <div class="panel-grid">
+      <div class="panel">
+        <h2>Emerging themes</h2>
+        <p class="muted small">Over-represented in the last 180 days versus the preceding period. Click a theme to search it.</p>
+        <div id="dashboard-themes"></div>
+      </div>
+      <div class="panel">
+        <h2>Coverage by company</h2>
+        <div id="dashboard-coverage"></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Newest documents</h2>
+      <div id="dashboard-recent"></div>
+    </div>
+  </section>
+
+  <!-- Research -->
+  <section class="view" id="view-research" hidden>
+    <form class="searchbar" id="search-form" role="search">
+      <div class="search-input">
+        <input id="q" name="q" type="search" placeholder="Search filings, transcripts, research and expert calls…"
+               autocomplete="off" aria-label="Search the research corpus">
+        <button class="primary" type="submit">Search</button>
+      </div>
+      <p class="hint">
+        Phrases in quotes, <code>-exclude</code> a term, <code>a OR b</code>, or scope with
+        <code>type:transcript</code> / <code>ticker:NVG</code>.
+        <label class="inline"><input type="checkbox" id="expand" checked> Expand synonyms</label>
+      </p>
+      <div class="examples" id="examples"></div>
+    </form>
+    <div class="results-layout">
+      <aside class="facets" id="facets" aria-label="Filters"></aside>
+      <div class="results">
+        <div class="results-head">
+          <div id="results-meta" class="muted small" role="status" aria-live="polite"></div>
+          <button class="ghost small" id="save-search" type="button">Save this search</button>
+        </div>
+        <div id="summary"></div>
+        <div id="results"></div>
+      </div>
+      <aside class="reader" id="reader" aria-label="Document reader"></aside>
+    </div>
+  </section>
+
+  <!-- Companies -->
+  <section class="view" id="view-companies" hidden>
+    <div class="view-head"><h1>Companies</h1></div>
+    <div class="company-layout">
+      <aside class="company-list" id="company-list" aria-label="Company list"></aside>
+      <div class="company-detail" id="company-detail"></div>
+    </div>
+  </section>
+
+  <!-- Pitch books -->
+  <section class="view" id="view-pitchbooks" hidden>
+    <div class="view-head">
+      <h1>Pitch books</h1>
+      <p class="muted">Generated from the same corpus and market data the research module indexes.</p>
+    </div>
+    <div class="book-layout">
+      <aside class="book-list">
+        <form class="newbook panel" id="book-form">
+          <h2>New pitch book</h2>
+          <label>Target company
+            <select id="book-target" required></select>
+          </label>
+          <label>Deck title
+            <input id="book-title" placeholder="Project Lighthouse">
+          </label>
+          <label>Client
+            <input id="book-client" placeholder="Board of directors">
+          </label>
+          <label>Adviser
+            <input id="book-banker" placeholder="Argos Advisory">
+          </label>
+          <fieldset>
+            <legend>Comparables</legend>
+            <div id="book-comps" class="comp-picker"></div>
+          </fieldset>
+          <button class="primary" type="submit">Generate deck</button>
+        </form>
+        <div class="panel">
+          <h2>Existing decks</h2>
+          <div id="book-index"></div>
+        </div>
+      </aside>
+      <div class="book-detail" id="book-detail"></div>
+    </div>
+  </section>
+
+  <!-- Monitor -->
+  <section class="view" id="view-monitor" hidden>
+    <div class="view-head">
+      <h1>Monitor</h1>
+      <p class="muted">Saved searches raise alerts when new documents match. Watchlists group the names you follow.</p>
+    </div>
+    <div class="panel-grid">
+      <div class="panel">
+        <h2>Alerts</h2>
+        <div id="alerts"></div>
+      </div>
+      <div class="panel">
+        <h2>Saved searches</h2>
+        <div id="saved-searches"></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Watchlists</h2>
+      <form class="row" id="watchlist-form">
+        <input id="watchlist-name" placeholder="New watchlist name" aria-label="New watchlist name">
+        <button class="primary" type="submit">Create</button>
+      </form>
+      <div id="watchlists"></div>
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<dialog id="pin-dialog">
+  <form method="dialog" id="pin-form">
+    <h2>Pin to a pitch book</h2>
+    <blockquote id="pin-quote" class="quote"></blockquote>
+    <label>Pitch book
+      <select id="pin-book"></select>
+    </label>
+    <label>Note (optional)
+      <input id="pin-note" placeholder="Why this matters">
+    </label>
+    <div class="dialog-actions">
+      <button value="cancel" class="ghost" type="submit">Cancel</button>
+      <button value="pin" class="primary" type="submit" id="pin-confirm">Pin evidence</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/app.js" type="module"></script>
+</body>
+</html>
