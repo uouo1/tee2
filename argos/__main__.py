@@ -38,6 +38,24 @@ def build_parser() -> argparse.ArgumentParser:
     seed_parser = subparsers.add_parser("seed", help="load the synthetic demo corpus and market data")
     _add_db_argument(seed_parser)
 
+    sec_parser = subparsers.add_parser(
+        "load-sec", help="load real companies from SEC EDGAR (financials, market data and filings)"
+    )
+    sec_parser.add_argument("tickers", nargs="+", help="e.g. ITRI BMI XYL")
+    sec_parser.add_argument("--sector", default=None, help="label the loaded set as one sector (used by comps)")
+    sec_parser.add_argument("--years", type=int, default=6, help="fiscal years of financials (default 6)")
+    sec_parser.add_argument("--annual", type=int, default=1, help="10-K filings per company (default 1)")
+    sec_parser.add_argument("--quarterly", type=int, default=2, help="10-Q filings per company (default 2)")
+    sec_parser.add_argument("--press-releases", type=int, default=4, help="8-K earnings releases per company (default 4)")
+    sec_parser.add_argument("--no-documents", action="store_true", help="fundamentals and market data only")
+    _add_db_argument(sec_parser)
+
+    deals_parser = subparsers.add_parser(
+        "load-transactions", help="load precedent transactions from a CSV you supply"
+    )
+    deals_parser.add_argument("path")
+    _add_db_argument(deals_parser)
+
     ingest_parser = subparsers.add_parser("ingest", help="ingest documents from a file or directory")
     ingest_parser.add_argument("path", help=".json / .jsonl / .csv / .txt file, or a directory of them")
     _add_db_argument(ingest_parser)
@@ -100,6 +118,27 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "seed":
         result = seed.seed_database(conn)
         print(json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "load-sec":
+        from .sources.sec import load_companies
+
+        result = load_companies(
+            conn, args.tickers, sector=args.sector, years=args.years,
+            annual=args.annual, quarterly=args.quarterly, press_releases=args.press_releases,
+            with_documents=not args.no_documents,
+        )
+        print(json.dumps(result, indent=2))
+        return 1 if result["failures"] and not result["loaded"] else 0
+
+    if args.command == "load-transactions":
+        from .sources.sec import load_transactions_csv
+
+        path = Path(args.path).expanduser()
+        if not path.exists():
+            print(f"no such path: {path}", file=sys.stderr)
+            return 2
+        print(json.dumps(load_transactions_csv(conn, path), indent=2))
         return 0
 
     if args.command == "ingest":

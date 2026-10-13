@@ -28,10 +28,85 @@ STOPWORDS: frozenset[str] = frozenset(
     their theirs them themselves then there these they this those through to too under until up
     very was wasn't we were weren't what when where which while who whom why with won't would
     wouldn't you your yours yourself yourselves will shall may might must us thing things
-    quarter year years thank thanks please question questions next first second third call
+    quarter year years thank thanks please question questions next first second third call whether
     going got get go really lot bit kind sort going want want's said say says one two three
     """.split()
 )
+
+# Structural vocabulary of SEC filings. It is not meaningless, but it is the same
+# in every document, so it can only ever surface as a theme by accident of
+# which filing types happen to fall inside a comparison window.
+FILING_BOILERPLATE: frozenset[str] = frozenset(
+    """
+    act quarterly unaudited item items part statements statement securities proceeds unregistered
+    registrant form filed filing incorporated reference exhibit exhibits table contents pursuant
+    section herein thereof thereto hereby million millions thousand thousands billion period periods
+    ended months month three six nine twelve respectively compared fiscal company inc corporation
+    condensed consolidated notes note accompanying december january february march april june july
+    august september october november quarter quarters amounts dollars except per share shares
+    december31 pages page see refer defined accordance gaap sec commission exchange
+    indicate check mark affiliates filer accelerated emerging smaller reporting seasoned shell
+    forward-looking contained cause actual results differ materially uncertainties assumptions
+    chairman president officer chief executive vice director directors release contact
+    """.split()
+)
+STOPWORDS = STOPWORDS | FILING_BOILERPLATE
+
+TABLE_ROW_RE = re.compile(r"[\d$%()—–-]")
+
+
+def looks_like_table_row(text: str) -> bool:
+    """True when a "sentence" is really a row of figures from a financial table.
+
+    Filings flatten tables into lines like "374.1 $ 325.9 Gross margin 49.0 %
+    50.6 %"; they are worth indexing but useless as a summary bullet.
+    """
+    tokens = text.split()
+    if len(tokens) < 4:
+        return False
+    numeric = sum(1 for t in tokens if TABLE_ROW_RE.fullmatch(t.strip(".,;:")) or any(ch.isdigit() for ch in t))
+    return numeric / len(tokens) > 0.4
+
+
+HEADING_CONNECTORS = frozenset({"of", "and", "the", "for", "to", "in", "on", "a", "an", "or", "&", "by", "with"})
+
+
+def looks_like_heading(text: str) -> bool:
+    """True for Title Case section headings ("Results of Operations")."""
+    words = [w for w in text.split() if w[:1].isalpha() and len(w) > 2]
+    if len(words) < 2:
+        return False
+    capitalised = sum(1 for w in words if w[:1].isupper() or w.lower() in HEADING_CONNECTORS)
+    return capitalised / len(words) >= 0.75
+
+
+def strip_leading_heading(text: str) -> str:
+    """Remove a Title Case heading fused onto the front of a sentence.
+
+    Flattened filings have no period after "Unregistered Sales of Equity
+    Securities and Use of Proceeds", so the heading runs into the paragraph
+    that follows and the sentence splitter cannot separate them. A run of three
+    or more capitalised words at the start (connectors allowed) is a heading.
+    """
+    words = text.split()
+    run = 0
+    capitalised = 0
+    for word in words:
+        core = word.strip("().,;:'\"")
+        if not core:
+            break
+        if core[:1].isupper() or core.lower() in HEADING_CONNECTORS or core[:1].isdigit():
+            run += 1
+            if core[:1].isupper():
+                capitalised += 1
+            continue
+        break
+    if capitalised >= 3 and run < len(words):
+        return " ".join(words[run:])
+    if capitalised >= 3 and run == len(words):
+        return ""  # the whole thing is a heading
+    return text
+
 
 # Finance-tuned polarity. Values are deliberately coarse: the signal that matters
 # is direction and relative intensity across a corpus, not a calibrated score.
@@ -232,7 +307,7 @@ def summarize(text: str, limit: int = 4, query_terms: Sequence[str] = ()) -> lis
     scored: list[tuple[float, int, str]] = []
     for idx, sentence in enumerate(sents):
         toks = content_tokens(sentence)
-        if not toks:
+        if not toks or looks_like_table_row(sentence):
             continue
         mass = sum(weights[t] for t in toks) / math.sqrt(len(toks))
         position_bonus = 1.25 if idx == 0 else (1.1 if idx < 3 else 1.0)
@@ -295,9 +370,21 @@ def theme_trends(
     """
 
     def features(text: str) -> set[str]:
-        tokens = content_tokens(text)
-        grams = {f"{a} {b}" for a, b in zip(tokens, tokens[1:])}
-        return set(tokens) | grams
+        # Build phrases inside prose sentences only. Bigrams taken across the
+        # whole token stream straddle headings and table-of-contents lines, and
+        # "Risk Factors / Unregistered Sales of Equity" became the theme
+        # "factors sales" in a real filing corpus.
+        found: set[str] = set()
+        for sentence in sentences(text) or [text]:
+            if looks_like_table_row(sentence) or looks_like_heading(sentence):
+                continue
+            sentence = strip_leading_heading(sentence)
+            tokens = content_tokens(sentence)
+            if len(tokens) < 3:  # a fragment, not a sentence
+                continue
+            found.update(tokens)
+            found.update(f"{a} {b}" for a, b in zip(tokens, tokens[1:]))
+        return found
 
     recent_counts: Counter[str] = Counter()
     recent_docs = 0

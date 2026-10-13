@@ -107,6 +107,7 @@ companies, financials, market data ──────┼──▶ valuation ─�
 | `argos/pitchbook.py` | Slide generation, pinning, evidence, assumptions |
 | `argos/charts.py` | Server-rendered SVG on a validated palette |
 | `argos/exporters/` | HTML, PPTX (native editable charts), PDF |
+| `argos/sources/` | SEC EDGAR loader (XBRL fundamentals, filings), public quotes, HTML-to-text |
 | `argos/api.py`, `argos/server.py` | JSON API and the stdlib HTTP server |
 | `argos/static/` | The web UI |
 
@@ -121,6 +122,8 @@ generated from the same palette the exporters use, with light and dark modes.
 ```
 argos serve     [--host --port --db --quiet]   run the web application
 argos seed      [--db]                         load the demo dataset
+argos load-sec  <tickers…> [--sector --years --annual --quarterly --press-releases --no-documents]
+argos load-transactions <deals.csv>            precedent transactions from your own CSV
 argos ingest    <path> [--db]                  ingest .json/.jsonl/.csv/.txt, or a directory
 argos search    <query> [--limit --json --no-expand]
 argos pitchbook <ticker> [--title --client --banker --comps --export --out]
@@ -128,14 +131,38 @@ argos export    <id> [--format html|pptx|pdf --out]
 argos stats                                    corpus statistics as JSON
 ```
 
-`ARGOS_DB`, `ARGOS_HOST`, `ARGOS_PORT`, `ARGOS_SEED_DIR` and `ARGOS_EXPORT_DIR`
-override the defaults.
+`ARGOS_DB`, `ARGOS_HOST`, `ARGOS_PORT`, `ARGOS_SEED_DIR`, `ARGOS_EXPORT_DIR`,
+`ARGOS_HTTP_CACHE` and `ARGOS_USER_AGENT` override the defaults. SEC asks
+automated clients to identify themselves: set `ARGOS_USER_AGENT` to something
+that includes a way to contact you before loading at volume.
 
-## Loading your own data
+## Real data from SEC EDGAR
 
-The demo corpus is synthetic and generated locally — fictional companies, with
-a narrative arc across periods so themes and tone have something real-shaped to
-find. Replace it with your own:
+The demo corpus is synthetic so the app runs offline. For real companies, one
+command loads filed financials, a live quote and the filings themselves:
+
+```bash
+python3 -m argos load-sec ITRI BMI XYL TRMB VNT ZBRA WTS \
+    --sector "Smart Infrastructure & Measurement" --db data/real.db
+python3 -m argos serve --db data/real.db
+```
+
+That pulls, for each ticker: six fiscal years of XBRL fundamentals (revenue,
+operating income, D&A, net income, EPS, capex, working capital, tax), shares
+outstanding and net debt from the balance sheet, the current price and 52-week
+range, and the latest 10-K, two 10-Qs and four 8-K earnings releases as a
+searchable corpus. Downloads are cached under `data/cache/` and ingest is
+idempotent, so re-running is cheap.
+
+**[TUTORIAL.md](TUTORIAL.md) walks through a full real-data session** — from an
+empty database to an exported Itron pitch book — and explains what every number
+on the valuation page is made of.
+
+Precedent transactions are the one input EDGAR cannot supply in machine-readable
+form; load your own with `argos load-transactions deals.csv` (template in
+`docs/precedent-transactions-template.csv`). The deck adapts when none exist.
+
+## Loading your own documents
 
 ```bash
 python3 -m argos ingest ~/corpus/        # directory of documents
@@ -152,7 +179,7 @@ to load company fundamentals, market data and precedent transactions, and
 python3 -m unittest discover -s tests -t .
 ```
 
-166 tests covering sentiment and KPI extraction, query parsing and ranking,
+Tests cover sentiment and KPI extraction, query parsing and ranking,
 facets and snippet escaping, DCF mechanics (mid-year convention, exit multiples,
 terminal-growth validation, sensitivity monotonicity), slide generation and
 pinning, evidence, every API route, path-traversal and XSS defences, the

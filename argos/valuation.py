@@ -514,9 +514,10 @@ def football_field(
 def default_assumptions(metrics: dict[str, Any]) -> DCFAssumptions:
     """Seed DCF assumptions from a company's own history.
 
-    Growth comes from the last two actual years, margin from the latest actual,
-    and capex/D&A intensity from the same period, so the base case is the
-    company's own trajectory rather than a house view.
+    Growth comes from the last two actual years, margin and capex intensity from
+    the latest actual, working-capital intensity from a three-year average
+    (a single year's swing is noise), and the tax rate is held to a normalised
+    band because one year's effective rate is not a forecast.
     """
     financials = metrics.get("financials") or []
     actuals = [f for f in financials if not f["is_estimate"]]
@@ -528,14 +529,24 @@ def default_assumptions(metrics: dict[str, Any]) -> DCFAssumptions:
     if len(actuals) >= 2 and actuals[-2]["revenue"]:
         growth = max(-0.1, min(0.45, revenue / float(actuals[-2]["revenue"]) - 1))
 
+    nwc_ratios = [
+        float(f["nwc_change"]) / float(f["revenue"])
+        for f in actuals[-3:] if f.get("nwc_change") is not None and f.get("revenue")
+    ]
+    nwc_pct = sum(nwc_ratios) / len(nwc_ratios) if nwc_ratios else 0.012
+    nwc_pct = max(-0.03, min(0.05, nwc_pct))
+
+    filed_tax = latest.get("tax_rate")
+    tax_rate = max(0.15, min(0.35, float(filed_tax))) if filed_tax is not None else CONFIG.default_tax_rate
+
     return DCFAssumptions(
         base_revenue=revenue,
         revenue_growth=round(growth, 4),
         ebitda_margin=round(ebitda / revenue, 4) if revenue else 0.2,
         da_pct_revenue=round(float(latest.get("dep_amort") or 0) / revenue, 4) if revenue else 0.05,
         capex_pct_revenue=round(float(latest.get("capex") or 0) / revenue, 4) if revenue else 0.04,
-        nwc_pct_revenue=round(float(latest.get("nwc_change") or 0) / revenue, 4) if revenue else 0.012,
-        tax_rate=float(latest.get("tax_rate") or CONFIG.default_tax_rate),
+        nwc_pct_revenue=round(nwc_pct, 4),
+        tax_rate=round(tax_rate, 4),
         wacc=round(CONFIG.default_wacc + ((float(metrics.get("beta") or 1.0) - 1.0) * 0.02), 4),
         terminal_growth=CONFIG.default_terminal_growth,
         net_debt=float(metrics.get("net_debt") or 0.0),

@@ -451,13 +451,19 @@ def summarize_results(
         if _is_boilerplate_speaker(row.get("speaker")):
             continue
         candidates = nlp.summarize(row["text"], limit=4, query_terms=terms) or [row["text"]]
-        statements = [c for c in candidates if not c.rstrip().endswith("?")]
-        # A fragment ("Competitive renewals.") is technically the top-ranked
-        # sentence and useless as a finding, so require a clause's worth of words.
-        substantial = [c for c in statements if len(c.split()) >= 8]
-        sentence = (substantial or statements or candidates)[0] if (substantial or statements) else None
-        if sentence is None:
+        statements = [
+            c for c in candidates
+            if not c.rstrip().endswith("?") and not nlp.looks_like_table_row(c) and not nlp.looks_like_heading(c)
+        ]
+        # A fragment ("Competitive renewals.") or a section heading ("Bookings
+        # and Backlog of Orders") is technically the top-ranked sentence and
+        # useless as a finding: require a clause's worth of words or skip.
+        substantial = [nlp.strip_leading_heading(c) for c in statements if len(c.split()) >= 8]
+        substantial = [c for c in substantial if len(c.split()) >= 8]
+        if not substantial:
             continue
+        sentence = substantial[0]
+        sentence = sentence[:1].upper() + sentence[1:]  # a stripped heading leaves a lowercase start
         # Near-identical boilerplate across documents (the same risk-factor
         # paragraph, the same wire copy) would otherwise fill the summary with
         # one claim repeated five times.

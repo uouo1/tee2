@@ -22,13 +22,15 @@ const state = {
   pinTarget: null,
 };
 
-const EXAMPLE_QUERIES = [
-  "pricing pressure renewals",
-  '"interconnection queue"',
-  "guidance type:transcript",
+// Example chips adapt to whatever corpus is loaded: the ticker-scoped
+// examples use the first company in the database rather than a demo name.
+const exampleQueries = (ticker) => [
+  "pricing pressure",
+  '"backlog" OR "order book"',
+  "guidance type:press-release",
   "margin -restructuring",
-  "datacenter OR tariff",
-  "ticker:NVG churn",
+  "tariff OR datacenter",
+  `ticker:${ticker || "NVG"} cash flow`,
 ];
 
 /* ----------------------------------------------------------------- utils */
@@ -723,6 +725,18 @@ async function openPinDialog(target) {
   $("#pin-dialog").showModal();
 }
 
+async function renderExamples() {
+  let first = null;
+  try {
+    if (!state.companies.length) state.companies = (await api("/api/companies")).companies;
+    first = state.companies[0]?.ticker || null;
+  } catch (error) { /* examples are a convenience; the search box works without them */ }
+  $("#examples").replaceChildren(...exampleQueries(first).map((query) => el("button", {
+    class: "chip", type: "button",
+    onclick: () => { $("#q").value = query; runSearch(); },
+  }, query)));
+}
+
 /* ------------------------------------------------------------------ boot */
 
 function applyTheme(theme) {
@@ -744,10 +758,7 @@ function init() {
   initTheme();
   $$(".tab").forEach((tab) => tab.addEventListener("click", () => setRoute(tab.dataset.route)));
   $("#search-form").addEventListener("submit", (event) => { event.preventDefault(); runSearch(); });
-  $("#examples").replaceChildren(...EXAMPLE_QUERIES.map((query) => el("button", {
-    class: "chip", type: "button",
-    onclick: () => { $("#q").value = query; runSearch(); },
-  }, query)));
+  renderExamples();
   $("#save-search").addEventListener("click", async () => {
     if (!state.query) { toast("Type a query first."); return; }
     await api("/api/saved-searches", {

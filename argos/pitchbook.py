@@ -283,18 +283,27 @@ def _slide_executive_summary(ctx: dict[str, Any]) -> dict[str, Any]:
             },
         })
 
-    themes = [t["theme"] for t in (profile.get("themes") or [])[:4]]
+    # Themes grounded in the passages the research query actually matched; the
+    # per-company trend model is too thin on a handful of filings to quote.
+    themes = [
+        t["theme"] for t in (research.get("summary", {}).get("themes") or [])
+        if len(t["theme"]) >= 5
+    ][:4]
     if themes:
         bullets.append({"text": (
-            "Dominant themes in the company's recent disclosure and sell-side coverage: "
-            + ", ".join(themes) + "."
+            "Recurring themes in the company's own disclosure on these topics: " + ", ".join(themes) + "."
         )})
     sentiment = profile.get("sentiment")
     if sentiment is not None:
+        if sentiment >= 0.18:
+            reading = "supportive of a sale process narrative"
+        elif sentiment <= -0.18:
+            reading = "a reason to pre-empt diligence questions on momentum"
+        else:
+            reading = "neither a tailwind nor a headwind for a process narrative"
         bullets.append({"text": (
             f"Corpus tone across {profile.get('document_count', 0)} documents is "
-            f"{profile.get('sentiment_label', 'neutral')} ({sentiment:+.2f} on a −1 to +1 scale), which we read as "
-            f"{'supportive of a sale process narrative' if sentiment >= 0 else 'a reason to pre-empt diligence questions on momentum'}."
+            f"{profile.get('sentiment_label', 'neutral')} ({sentiment:+.2f} on a −1 to +1 scale), which we read as {reading}."
         )})
 
     return {
@@ -449,17 +458,22 @@ def _slide_precedents(ctx: dict[str, Any]) -> dict[str, Any]:
     field = ctx["field"]
     precedents = field["precedents"]
     stats = precedents["stats"]
+    if precedents["rows"]:
+        note = (
+            f"Median EV/EBITDA of {_fmt_x(stats['ev_ebitda']['median'])} on a median one-day premium of "
+            f"{_fmt_pct(stats['premium_1day']['median'])} across {stats['ev_ebitda']['count']} transactions."
+        )
+    else:
+        note = (
+            "No precedent transactions are loaded for this sector. Deal multiples are not available from "
+            "public filings in a consistent form; load a transaction screen with "
+            "`argos load-transactions deals.csv` and rebuild the deck to populate this page and the "
+            "precedent range on the valuation summary."
+        )
     return {
         "title": "Precedent transactions",
         "subtitle": "Announced transactions in the sector",
-        "payload": {
-            "rows": precedents["rows"],
-            "stats": stats,
-            "note": (
-                f"Median EV/EBITDA of {_fmt_x(stats['ev_ebitda']['median'])} on a median one-day premium of "
-                f"{_fmt_pct(stats['premium_1day']['median'])} across {stats['ev_ebitda']['count']} transactions."
-            ),
-        },
+        "payload": {"rows": precedents["rows"], "stats": stats, "note": note},
     }
 
 
@@ -541,17 +555,25 @@ def _slide_buyers(ctx: dict[str, Any]) -> dict[str, Any]:
     candidates.sort(key=lambda c: -(c["enterprise_value"] or 0))
 
     premium = field["precedents"]["stats"]["premium_1day"]
+    if premium.get("median") is not None:
+        sponsor_note = (
+            f"Recurring revenue supports leverage; precedent deals in the sector cleared at a median "
+            f"{_fmt_pct(premium['median'])} premium"
+        )
+    else:
+        sponsor_note = (
+            f"Net debt of {_fmt_money(metrics['net_debt'], metrics['currency'])} against EBITDA of "
+            f"{_fmt_money(metrics['latest_actual']['ebitda'], metrics['currency'])} leaves room for a leveraged structure; "
+            "no precedent premium data loaded"
+        )
     sponsors = [{
-        "name": "Financial sponsors (large-cap software funds)",
+        "name": "Financial sponsors",
         "ticker": "—",
         "type": "Sponsor",
         "enterprise_value": None,
         "relative_size": None,
         "sentiment": None,
-        "rationale": (
-            f"Subscription mix and recurring revenue support leverage; precedent sponsor deals in the sector cleared at a "
-            f"median {_fmt_pct(premium['median'])} premium"
-        ),
+        "rationale": sponsor_note,
     }]
     return {
         "title": "Potential counterparties",
@@ -570,9 +592,19 @@ def _slide_process(ctx: dict[str, Any]) -> dict[str, Any]:
         f"Reference range of {_fmt_price(concluded['low'], currency)}–{_fmt_price(concluded['high'], currency)} per "
         f"share implies a {(concluded['low'] / price - 1) * 100:+.0f}% to "
         f"{(concluded['high'] / price - 1) * 100:+.0f}% move versus the current {_fmt_price(price, currency)}.",
-        f"Precedent one-day premia have clustered between {_fmt_pct(premium['p25'])} and {_fmt_pct(premium['p75'])}; "
-        f"applying the median {_fmt_pct(premium['median'])} to the current price implies "
-        f"{_fmt_price(price * (1 + (premium['median'] or 0)), currency)} per share.",
+    ]
+    if premium.get("median") is not None:
+        bullets.append(
+            f"Precedent one-day premia have clustered between {_fmt_pct(premium['p25'])} and {_fmt_pct(premium['p75'])}; "
+            f"applying the median {_fmt_pct(premium['median'])} to the current price implies "
+            f"{_fmt_price(price * (1 + premium['median']), currency)} per share."
+        )
+    else:
+        bullets.append(
+            "No precedent transactions are loaded, so the control premium is unquantified here; load a deal screen "
+            "(`argos load-transactions`) before the valuation discussion."
+        )
+    bullets += [
         f"Net debt of {_fmt_money(metrics['net_debt'], metrics['currency'])} is modest relative to EBITDA of "
         f"{_fmt_money(metrics['latest_actual']['ebitda'], metrics['currency'])}, leaving room for a leveraged structure.",
         "Diligence focus: durability of subscription pricing in competitive renewals, services mix in reported margin, "

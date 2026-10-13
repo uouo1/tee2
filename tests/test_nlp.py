@@ -88,6 +88,58 @@ class ThemeTests(unittest.TestCase):
         self.assertIn("outlook", expanded)
 
 
+class HeadingTests(unittest.TestCase):
+    def test_title_case_headings_are_detected(self):
+        self.assertTrue(nlp.looks_like_heading("Item 2. Unregistered Sales of Equity Securities and Use of Proceeds"))
+        self.assertTrue(nlp.looks_like_heading("Management's Discussion and Analysis of Financial Condition and Results of Operations"))
+        self.assertFalse(nlp.looks_like_heading("Total backlog at quarter end was $4.4 billion compared with $4.5 billion."))
+        self.assertFalse(nlp.looks_like_heading("Backlog"))
+
+    def test_fused_heading_prefix_is_stripped(self):
+        fused = "Unregistered Sales of Equity Securities and Use of Proceeds none were sold this quarter."
+        self.assertEqual(nlp.strip_leading_heading(fused), "none were sold this quarter.")
+        # Connectors trailing the heading go with it.
+        self.assertEqual(nlp.strip_leading_heading("Risk Factors Sales of our products fell."), "our products fell.")
+        self.assertEqual(nlp.strip_leading_heading("Revenue grew because demand was strong."), "Revenue grew because demand was strong.")
+        self.assertEqual(nlp.strip_leading_heading("Liquidity and Capital Resources"), "")
+        # Two-word headings are left for looks_like_heading to catch whole.
+        self.assertEqual(nlp.strip_leading_heading("Results of Operations"), "Results of Operations")
+
+    def test_headings_do_not_become_themes(self):
+        recent = ["Item 2. Unregistered Sales of Equity Securities and Use of Proceeds. "
+                  "Demand for grid software rose across the utility base this quarter."] * 4
+        themes = [row["theme"] for row in nlp.theme_trends(recent, ["Quiet baseline text about nothing."] * 4, limit=20)]
+        self.assertNotIn("equity use", themes)
+        self.assertNotIn("sales equity", themes)
+
+
+class TableRowTests(unittest.TestCase):
+    def test_detects_flattened_table_rows(self):
+        self.assertTrue(nlp.looks_like_table_row("374.1 $ 325.9 Gross margin 49.0 % 50.6 % 540 bps"))
+        self.assertFalse(nlp.looks_like_table_row("Gross margin expanded to 49.0% on favourable mix."))
+
+    def test_summary_skips_table_rows(self):
+        text = ("Revenue grew 12% on strong demand. 71,344 305,957 63,536 440,837 29.9 % 37.7 % 38.8 %. "
+                "Backlog ended the quarter at $4.4 billion.")
+        summary = nlp.summarize(text, limit=2)
+        self.assertFalse(any(nlp.looks_like_table_row(s) for s in summary))
+
+    def test_themes_do_not_bridge_headings(self):
+        recent = ["Item 1A. Risk Factors. Item 2. Unregistered Sales of Equity Securities. "
+                  "Demand for interconnection software grew strongly across the utility customer base this year."] * 4
+        baseline = ["Nothing in particular happened during the comparison window at all."] * 4
+        themes = [row["theme"] for row in nlp.theme_trends(recent, baseline, limit=20)]
+        self.assertNotIn("factors sales", themes)
+        self.assertNotIn("sales equity", themes)
+        self.assertTrue(any("interconnection" in t for t in themes))
+
+    def test_filing_boilerplate_is_not_a_theme(self):
+        recent = ["condensed consolidated statements unaudited quarterly period item part"] * 4
+        baseline = ["annual report risk factors"] * 4
+        themes = [row["theme"] for row in nlp.theme_trends(recent, baseline)]
+        self.assertFalse(any(word in themes for word in ("quarterly", "unaudited", "item")))
+
+
 class KeywordTests(unittest.TestCase):
     def test_repeated_terms_outrank_singletons(self):
         text = " ".join(["interconnection queue"] * 5 + ["sporadic", "irrelevant", "oneoff"])

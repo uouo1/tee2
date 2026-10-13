@@ -37,7 +37,9 @@ headcount, free cash flow).
 
 ## Companies, financials and market data
 
-Company fundamentals are not documents; load them directly:
+For US-listed companies, `argos load-sec TICKER …` fills all of this from SEC
+EDGAR (see `TUTORIAL.md`). To load fundamentals from another source, write the
+same tables directly:
 
 ```python
 from argos.db import open_db, insert, upsert_company
@@ -63,4 +65,6 @@ conn.commit()
 
 Amounts are in millions of the reporting currency; per-share figures are
 absolute; rates are decimals. Precedent transactions go in the `transactions`
-table with `ev_revenue`, `ev_ebitda` and `premium_1day`.
+table with `ev_revenue`, `ev_ebitda` and `premium_1day` — or use
+`argos load-transactions deals.csv` with the columns in
+`docs/precedent-transactions-template.csv`.
