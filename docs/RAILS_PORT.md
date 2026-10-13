@@ -272,3 +272,60 @@ Phase B (parallel): Pitchbooks + deck partials + Exporters::Html · controllers,
 routes, views, layout, CSS/JS for research/dashboard/companies/monitor ·
 rake tasks + API controllers. Phase C: integration, full suite, run the server,
 screenshots, adversarial review, delete the Python tree, update README/TUTORIAL.
+
+## Defects found by independent verification — the port must fix these
+
+An adversarial verification of the Python build (fresh clone, raw EDGAR
+re-fetch, filing provenance, code audit, skeptic) confirmed that it runs from
+the repository and that its Itron fundamentals and filings are genuine EDGAR
+data. It also found the following. The Rails version fixes each one and carries
+a regression test for it; porting the Python behaviour verbatim is wrong here.
+
+1. **HTML extractor drops most 10-Q text.** `argos/sources/htmltext.py` enters
+   hidden mode on *any* tag whose style contains `display:none` but only leaves
+   it on `</div>` or `</ix:header>`, so a hidden `<span>` swallows everything
+   after it; 10 of 14 real 10-Qs retained 2–9% of their words. `Sources::HtmlText`
+   must keep a stack of (tag name, hidden?) and un-hide only when the *same*
+   tag that opened the hidden block closes. Test: a hidden `<span>` followed by a
+   visible `<p>` keeps the paragraph; a 10-Q-sized fixture retains > 80% of its
+   visible words.
+2. **Share count.** Store diluted weighted-average shares in `shares_diluted`
+   and the cover-page count in `shares_basic` (already in the contract). The
+   company page and the comps table label which was used.
+3. **Missing net debt is not zero.** When a filer has no debt tags *and* no cash
+   tag, `net_debt` is nil and `Valuation.company_metrics` must report EV and
+   EV-based multiples as nil (shown as n/a, excluded from percentile statistics),
+   not compute them with net debt = 0. Add more cash fallbacks first:
+   `CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents`, `Cash`.
+4. **Quotes are cached forever.** `Sources::Market.fetch_quote` must key its
+   cache by (ticker, calendar day) so a reload refreshes the price; the
+   loader's summary says the quote date.
+5. **Search totals and pagination are wrong for broad queries.** The Python
+   ranked a top-k of chunks (`min(limit*6+offset, 600)`) then collapsed to
+   documents, so `total_documents` changes with page size. `Search.search` must
+   rank *documents*: one SQL that takes the best (lowest) bm25 per document
+   over *all* matching chunks (`GROUP BY document_id`, `MIN(bm25)`), weights
+   and sorts in Ruby, counts the true total, then paginates. Sentiment facet and
+   sentiment filter must both be document-level (`documents.sentiment`).
+6. **KPI extraction needs sanity bounds.** Reject headcount values that look like
+   years (1900–2100) or that are below 10; reject any margin/retention/growth
+   value above 100% (or below −100%); reject negative headcount/ARR/backlog.
+   Real filings produced `headcount = 2004` (from "2004 Stock Incentive Plan")
+   and `ebitda_margin = 120`.
+7. **Hardcoded analysis in slides.** Replace fixed-threshold prose with
+   data-driven comparisons: profitability vs the *peer median* margin
+   (above/in line/below with the numbers); leverage phrased from net debt /
+   EBITDA (net cash, < 1x, 1–3x, > 3x) rather than always "modest"; remove the
+   domain-specific "subscription pricing" diligence bullet (use a generic
+   bullet plus the company's own top themes); note on the DCF slide when beta
+   was not loaded so WACC is the default. Counterparty rationale must reflect
+   each peer's actual margin and multiple relative to the target.
+8. **Deck editing in the UI.** Slide title/subtitle editing (which pins),
+   reorder (move up/down), comp-set change and assumption edits must all be
+   reachable from the pitch-book page, not only from the API.
+9. **`POST /api/ingest` with `path`** must only read under `Rails.root/data`
+   (reject anything that resolves outside it). Document that there is no
+   authentication.
+10. **Test isolation.** Exports written during tests go to `tmp/` (set
+    `Exporters.export_dir` from an env/config value, `Rails.root/tmp/exports`
+    in test), never into `data/exports`.
