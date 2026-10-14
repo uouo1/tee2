@@ -35,3 +35,17 @@ namespace :backtest do
     puts JSON.pretty_generate(out)
   end
 end
+
+namespace :backtest do
+  desc "Evaluate the comps signal on the acquired data and write docs/backtests/<name>.md"
+  task :run, %i[name anchor_year] => :environment do |_t, args|
+    name = args[:name] || "comps-#{args[:anchor_year] || 2016}"
+    run = Backtest::Runner.run!(name: name, anchor_year: (args[:anchor_year] || 2016).to_i)
+    path = Backtest::Report.write(run)
+    summary = run.results_hash
+    puts JSON.pretty_generate(
+      id: run.id, name: run.name, report: path.to_s, universe: summary[:universe], dates: summary[:dates],
+      horizons: summary[:horizons].transform_values { |v| v.except(:series) }
+    )
+  end
+end
