@@ -870,7 +870,7 @@ class SourcesTest < ActiveSupport::TestCase
         quote
       )
     end
-    assert_equal "https://query1.finance.yahoo.com/v8/finance/chart/ITRI?range=1y&interval=1d", requested[0]
+    assert_equal Sources::Market.quote_url("ITRI"), requested[0]
     assert_equal Sources::Market::QUOTE_USER_AGENT, requested[1][:user_agent]
     assert_equal true, requested[1][:cache]
   end
@@ -906,5 +906,48 @@ class SourcesTest < ActiveSupport::TestCase
     stubbing(Sources::Http, fetch_json: ->(*) { raise Sources::Http::HttpError.new(429, "x") }) do
       assert_nil Sources::Market.fetch_quote("ITRI")
     end
+  end
+end
+
+
+class HtmlTextHiddenBlockTest < ActiveSupport::TestCase
+  test "a hidden span does not swallow the paragraphs that follow it" do
+    text = Sources::HtmlText.html_to_text(
+      '<span style="display:none">hidden fact</span><p>Revenue rose 12% this quarter.</p>' \
+      '<div><p>Backlog was $4.4 billion.</p></div>'
+    )
+    assert_includes text, "Revenue rose 12%"
+    assert_includes text, "Backlog was $4.4 billion"
+    refute_includes text, "hidden fact"
+  end
+
+  test "a hidden block ends when its own tag closes, even with nested copies" do
+    text = Sources::HtmlText.html_to_text(
+      '<div style="display:none"><div>inner</div>still hidden</div><p>Visible after.</p>'
+    )
+    refute_includes text, "inner"
+    refute_includes text, "still hidden"
+    assert_includes text, "Visible after."
+  end
+
+  test "a hidden void tag does not hide the rest of the document" do
+    text = Sources::HtmlText.html_to_text('<br style="display:none"><p>Still visible.</p>')
+    assert_includes text, "Still visible."
+  end
+
+  test "a 10-Q-shaped fixture keeps its visible text" do
+    visible = (1..40).map { |i| "<p>Paragraph #{i} discusses revenue and margins in detail.</p>" }.join
+    markup = "<ix:header>hidden header</ix:header>#{visible}<span style=\"display:none\">x</span>#{visible}"
+    text = Sources::HtmlText.html_to_text(markup)
+    assert_operator text.scan(/Paragraph \d+/).size, :>=, 80
+  end
+end
+
+class MarketQuoteCacheTest < ActiveSupport::TestCase
+  test "quote URL carries the calendar day so the cache refreshes daily" do
+    url = Sources::Market.quote_url("itri", on: Date.new(2026, 10, 14))
+    assert_includes url, "ITRI"
+    assert_includes url, "asof=2026-10-14"
+    refute_equal url, Sources::Market.quote_url("itri", on: Date.new(2026, 10, 15))
   end
 end

@@ -75,9 +75,12 @@ module Valuation
 
     price = (market&.share_price || 0.0).to_f
     shares = (market&.shares_diluted || 0.0).to_f
-    net_debt = (market&.net_debt || 0.0).to_f
+    # Unknown net debt is unknown, not zero: a verifier found a peer with no
+    # balance-sheet data feeding the target's valuation range through an EV
+    # computed as if it were debt-free. EV and EV multiples stay nil.
+    net_debt = market&.net_debt.nil? ? nil : market.net_debt.to_f
     market_cap = price * shares
-    enterprise_value = market_cap + net_debt
+    enterprise_value = net_debt.nil? ? nil : market_cap + net_debt
 
     forwards = financials.select { |f| f[:is_estimate] }.first(forward_years)
                          .map { |f| multiples_for(f, enterprise_value: enterprise_value, price: price) }
@@ -97,7 +100,7 @@ module Valuation
       shares_diluted: shares,
       net_debt: net_debt,
       market_cap: rnd(market_cap, 1),
-      enterprise_value: rnd(enterprise_value, 1),
+      enterprise_value: enterprise_value.nil? ? nil : rnd(enterprise_value, 1),
       week52_low: market&.week52_low,
       week52_high: market&.week52_high,
       beta: market&.beta,
@@ -164,6 +167,7 @@ module Valuation
   # earnings multiple).
   def implied_from_multiple(multiple_low, multiple_high, metric_value:, kind:, net_debt:, shares:)
     return nil if !number?(shares) || multiple_low.nil? || multiple_high.nil? || !number?(metric_value)
+    return nil if kind.to_s == "ev" && net_debt.nil? # cannot bridge EV to equity without it
 
     low_m, high_m = [multiple_low.to_f, multiple_high.to_f].sort
     metric_value = metric_value.to_f
@@ -507,8 +511,8 @@ module Valuation
       ebitda: ebitda,
       ebitda_margin: number?(revenue) ? rnd(ebitda / revenue, 4) : nil,
       eps: eps,
-      ev_revenue: number?(revenue) ? rnd(enterprise_value / revenue, 2) : nil,
-      ev_ebitda: number?(ebitda) ? rnd(enterprise_value / ebitda, 2) : nil,
+      ev_revenue: number?(revenue) && !enterprise_value.nil? ? rnd(enterprise_value / revenue, 2) : nil,
+      ev_ebitda: number?(ebitda) && !enterprise_value.nil? ? rnd(enterprise_value / ebitda, 2) : nil,
       pe: number?(eps) ? rnd(price / eps, 2) : nil
     }
   end

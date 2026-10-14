@@ -211,10 +211,10 @@ class ValuationCompanyMetricsTest < ActiveSupport::TestCase
     company.financials.create!(fiscal_year: 2025, revenue: 100.0, ebitda: 20.0, eps: 1.0)
     metrics = Valuation.company_metrics("PRIV")
     assert_equal 0.0, metrics[:share_price]
-    assert_equal 0.0, metrics[:enterprise_value]
+    assert_nil metrics[:enterprise_value] # unknown, not zero
     assert_nil metrics[:week52_low]
     assert_nil metrics[:as_of]
-    assert_equal 0.0, metrics[:latest_actual][:ev_ebitda]
+    assert_nil metrics[:latest_actual][:ev_ebitda]
     assert_equal 0.0, metrics[:latest_actual][:pe]
   end
 
@@ -825,5 +825,37 @@ class ValuationDefaultAssumptionsTest < ActiveSupport::TestCase
     assert_equal 0.2, a.ebitda_margin
     assert_equal 2027, a.start_year
     assert_raises(ArgumentError) { Valuation.run_dcf(a) }
+  end
+end
+
+
+class ValuationUnknownNetDebtTest < ActiveSupport::TestCase
+  setup do
+    @company = Company.create!(ticker: "NODEBT", name: "No Balance Sheet Co", sector: "Test")
+    Financial.create!(company: @company, fiscal_year: 2025, is_estimate: false, revenue: 1000.0, ebitda: 200.0, ebit: 150.0, eps: 2.0)
+    MarketDatum.create!(company: @company, share_price: 40.0, shares_diluted: 50.0, net_debt: nil)
+  end
+
+  teardown { @company.destroy }
+
+  test "unknown net debt leaves EV and EV multiples unknown rather than zero" do
+    metrics = Valuation.company_metrics("NODEBT")
+    assert_nil metrics[:net_debt]
+    assert_nil metrics[:enterprise_value]
+    assert_nil metrics[:latest_actual][:ev_ebitda]
+    assert_nil metrics[:latest_actual][:ev_revenue]
+    assert_in_delta 20.0, metrics[:latest_actual][:pe], 0.01, "equity multiples still work"
+    assert_in_delta 2000.0, metrics[:market_cap], 0.01
+  end
+
+  test "a peer without net debt is excluded from EV statistics" do
+    stats = Valuation.comps_table(["NODEBT"])[:stats]
+    assert_equal 0, stats[:ev_ebitda][:count]
+    assert_equal 1, stats[:pe][:count]
+  end
+
+  test "an EV multiple cannot be bridged to a share price without net debt" do
+    assert_nil Valuation.implied_from_multiple(10, 12, metric_value: 100, kind: "ev", net_debt: nil, shares: 10)
+    refute_nil Valuation.implied_from_multiple(10, 12, metric_value: 2.0, kind: "equity", net_debt: nil, shares: 10)
   end
 end

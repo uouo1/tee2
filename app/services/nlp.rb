@@ -340,6 +340,8 @@ module Nlp
             next
           end
           value *= 1000.0 if unit == "currency" && match[0].match?(BILLIONS_RE) # normalise to millions
+          next unless kpi_value_plausible?(metric, unit, value, match[1])
+
           found << {
             metric: metric,
             value: value,
@@ -350,6 +352,25 @@ module Nlp
       end
     end
     found
+  end
+
+  # Plausible ranges per metric. A value outside them is a parse, not a fact:
+  # real filings produced "headcount = 2004" (from "the 2004 Stock Incentive
+  # Plan") and "ebitda_margin = 120". Retention and growth may exceed 100%.
+  KPI_BOUNDS = {
+    "gross_margin" => (-100.0..100.0), "ebitda_margin" => (-100.0..100.0),
+    "operating_margin" => (-100.0..100.0), "capex_intensity" => (0.0..100.0),
+    "churn" => (0.0..100.0), "net_retention" => (0.0..300.0),
+    "revenue_growth" => (0.0..1000.0), "revenue_decline" => (0.0..100.0)
+  }.freeze
+
+  def kpi_value_plausible?(metric, unit, value, raw)
+    case unit
+    when "%" then KPI_BOUNDS.fetch(metric, (-100.0..100.0)).cover?(value)
+    # A four-digit count with no thousands separator that reads as a year is a year.
+    when "count" then value >= 10 && !(raw.exclude?(",") && value.between?(1900, 2100))
+    else value >= 0
+    end
   end
 
   # a, b are Hash{String => Numeric} term vectors (see .vector).

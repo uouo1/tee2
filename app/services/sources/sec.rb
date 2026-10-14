@@ -61,6 +61,7 @@ module Sources
       cash: %w[
         CashAndCashEquivalentsAtCarryingValue
         CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents
+        Cash
       ],
       short_term_investments: %w[
         ShortTermInvestments MarketableSecuritiesCurrent

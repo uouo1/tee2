@@ -22,6 +22,7 @@ module Sources
     # text starts a fresh paragraph rather than gluing onto a table cell.
     PARAGRAPH_TAGS = %w[p div tr table h1 h2 h3].to_set.freeze
     SKIP_TAGS = %w[script style noscript head title].to_set.freeze
+    VOID_TAGS = %w[br img hr input meta link area base col embed source track wbr].to_set.freeze
     # Elements whose content is raw text (a "<" inside a script is not a tag).
     RAW_TEXT_TAGS = %w[script style].to_set.freeze
 
@@ -177,7 +178,11 @@ module Sources
       def initialize
         @parts = +""
         @skip_depth = 0
-        @hidden_depth = 0
+        # Tags that opened hidden blocks, innermost last. A counter decremented
+        # on any </div> let a hidden <span> swallow the rest of a 10-Q (10 of 14
+        # real filings kept under 10% of their text); un-hiding only when the
+        # opening tag itself closes keeps the paragraph after it.
+        @hidden_stack = []
       end
 
       def run(markup)
@@ -266,8 +271,14 @@ module Sources
         end
         # Inline XBRL hides a parallel copy of every fact; keep it out of the text.
         style = attributes["style"].to_s.delete(" ").downcase
-        if tag == "ix:header" || style.include?("display:none")
-          @hidden_depth += 1
+        if @hidden_stack.any?
+          # Only a nested copy of the opening tag matters: its close must not
+          # un-hide early. Void tags never close, so they are never pushed.
+          @hidden_stack << tag if tag == @hidden_stack.last && !VOID_TAGS.include?(tag)
+          return
+        end
+        if (tag == "ix:header" || style.include?("display:none")) && !VOID_TAGS.include?(tag)
+          @hidden_stack << tag
           return
         end
         @parts << "\n" if BLOCK_TAGS.include?(tag)
@@ -279,15 +290,15 @@ module Sources
           @skip_depth -= 1
           return
         end
-        if (tag == "ix:header" || tag == "div") && @hidden_depth.positive?
-          @hidden_depth -= 1
+        if @hidden_stack.any?
+          @hidden_stack.pop if tag == @hidden_stack.last
           return
         end
         @parts << "\n" if BLOCK_TAGS.include?(tag)
       end
 
       def handle_data(data)
-        return if @skip_depth.positive? || @hidden_depth.positive?
+        return if @skip_depth.positive? || @hidden_stack.any?
 
         data = HtmlText.unescape(data)
         return if data.match?(/\A[[:space:]]*\z/)

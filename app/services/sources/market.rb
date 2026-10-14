@@ -16,10 +16,10 @@ module Sources
     # Return price, 52-week range and currency for a ticker, or nil.
     #
     # `as_of` is a Date (ISO strings only at the API boundary).
-    def fetch_quote(ticker, cache: true)
+    def fetch_quote(ticker, cache: true, on: Date.today)
       payload =
         begin
-          Http.fetch_json(format(QUOTE_URL, ticker: ticker.upcase), cache: cache, user_agent: QUOTE_USER_AGENT)
+          Http.fetch_json(quote_url(ticker, on: on), cache: cache, user_agent: QUOTE_USER_AGENT)
         rescue StandardError
           return nil
         end
@@ -44,6 +44,13 @@ module Sources
         as_of: as_of(meta),
         exchange: meta[:fullExchangeName]
       }
+    end
+
+    # The disk cache is keyed by URL, so the calendar day rides along as a query
+    # parameter the endpoint ignores; without it a cached quote was served
+    # forever and "re-run the loader to refresh" was false.
+    def quote_url(ticker, on: Date.today)
+      "#{format(QUOTE_URL, ticker: ticker.upcase)}&asof=#{on.iso8601}"
     end
 
     # Python's `or` on a number: nil and zero both fall through to the fallback.

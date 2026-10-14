@@ -375,3 +375,23 @@ class NlpVectorTest < ActiveSupport::TestCase
     assert_equal 0.0, Nlp.cosine_similarity(nil, { "a" => 1 })
   end
 end
+
+
+class NlpKpiBoundsTest < ActiveSupport::TestCase
+  test "a year masquerading as a headcount is rejected, a real count is kept" do
+    year = Nlp.extract_kpis("Options were granted to employees under the 2004 Stock Incentive Plan.")
+    assert_empty year.select { |k| k[:metric] == "headcount" }
+    real = Nlp.extract_kpis("Headcount was 2,004 at year end.")
+    assert_equal [2004.0], real.select { |k| k[:metric] == "headcount" }.map { |k| k[:value] }
+  end
+
+  test "margins above 100 percent are rejected but retention above 100 is kept" do
+    assert_empty Nlp.extract_kpis("Adjusted EBITDA margin 120 % was reported in the table.")
+    assert_equal [27.7], Nlp.extract_kpis("Adjusted EBITDA margin was 27.7%.").map { |k| k[:value] }
+    assert_equal [114.0], Nlp.extract_kpis("Net dollar retention of 114%.").map { |k| k[:value] }
+  end
+
+  test "negative currency amounts are rejected" do
+    assert_empty Nlp.extract_kpis("Free cash flow -$12 million.").select { |k| k[:metric] == "free_cash_flow" && k[:value].negative? }
+  end
+end
