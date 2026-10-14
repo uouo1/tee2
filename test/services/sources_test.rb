@@ -462,6 +462,7 @@ class SourcesTest < ActiveSupport::TestCase
     assert_equal [2024, 2025], result[:fiscal_years]
     assert_in_delta 2400.0, result[:latest_revenue]
     assert_in_delta 123.45, result[:share_price]
+    assert_equal Date.new(2026, 10, 9), result[:quote_as_of] # the summary says which day the price is from
     assert_equal 0, result[:documents_added]
     assert_equal 0, result[:documents_skipped]
   end
@@ -490,6 +491,7 @@ class SourcesTest < ActiveSupport::TestCase
                            fetch_facts: ->(_c) { facts_fixture }) do
       result = Sources::Sec.load_company("ITRI", with_documents: false, with_quote: false)
       assert_nil result[:share_price]
+      assert_nil result[:quote_as_of]
       assert_nil Company.find_ticker("ITRI").market_datum
     end
   end
@@ -757,15 +759,31 @@ class SourcesTest < ActiveSupport::TestCase
   end
 
   test "client errors raise immediately without retry" do
+    # The reference listed 400/401/403/404; the contract says every 4xx raises.
+    [400, 401, 403, 404, 410, 422].each do |status|
+      with_http_sandbox do |sleeps|
+        calls = 0
+        stubbing(Sources::Http, perform_request: ->(*) { calls += 1; FakeResponse.new(status.to_s, "", {}) }) do
+          error = assert_raises(Sources::Http::HttpError) { Sources::Http.fetch("https://example.test/missing") }
+          assert_equal status, error.status
+          assert error.client_error?
+        end
+        assert_equal 1, calls, "HTTP #{status} should not be retried"
+        assert_empty sleeps
+        assert_not Sources::Http.cache_path("https://example.test/missing").exist?
+      end
+    end
+  end
+
+  test "rate limiting is the one client error that is retried" do
     with_http_sandbox do |sleeps|
       calls = 0
-      stubbing(Sources::Http, perform_request: ->(*) { calls += 1; FakeResponse.new("404", "", {}) }) do
-        error = assert_raises(Sources::Http::HttpError) { Sources::Http.fetch("https://example.test/missing") }
-        assert_equal 404, error.status
+      transport = ->(*) { calls += 1; FakeResponse.new(calls < 3 ? "429" : "200", calls < 3 ? "" : "ok", {}) }
+      stubbing(Sources::Http, perform_request: transport) do
+        assert_equal "ok", Sources::Http.fetch("https://example.test/throttled", cache: false)
       end
-      assert_equal 1, calls
-      assert_empty sleeps
-      assert_not Sources::Http.cache_path("https://example.test/missing").exist?
+      assert_equal 3, calls
+      assert_equal [1, 2], sleeps
     end
   end
 
@@ -935,11 +953,73 @@ class HtmlTextHiddenBlockTest < ActiveSupport::TestCase
     assert_includes text, "Still visible."
   end
 
+  test "an unclosed hidden span ends with the element that contains it" do
+    # The stack holds every open element, so closing the cell closes the span
+    # inside it, as a browser would; the next cell is content again.
+    text = Sources::HtmlText.html_to_text(
+      '<table><tr><td><span style="display:none">hidden fact</td><td>Visible cell text.</td></tr></table>' \
+      '<p>Visible paragraph.</p>'
+    )
+    refute_includes text, "hidden fact"
+    assert_includes text, "Visible cell text."
+    assert_includes text, "Visible paragraph."
+  end
+
+  test "a stray close tag and hidden markup inside skipped elements are harmless" do
+    text = Sources::HtmlText.html_to_text(
+      '</div></span><noscript><div style="display:none">x</noscript><p>Shown anyway.</p>'
+    )
+    assert_equal "Shown anyway.", text
+  end
+
   test "a 10-Q-shaped fixture keeps its visible text" do
     visible = (1..40).map { |i| "<p>Paragraph #{i} discusses revenue and margins in detail.</p>" }.join
     markup = "<ix:header>hidden header</ix:header>#{visible}<span style=\"display:none\">x</span>#{visible}"
     text = Sources::HtmlText.html_to_text(markup)
     assert_operator text.scan(/Paragraph \d+/).size, :>=, 80
+  end
+
+  # An inline-XBRL quarterly report in miniature: the hidden header block with
+  # its nested fact copies, cover-page facts in hidden spans, a table of
+  # contents, running page numbers, and page after page of prose whose
+  # paragraphs interleave visible <ix:nonFraction> facts with hidden ones —
+  # the pattern that left 10 of 14 real 10-Qs with 2–9% of their words.
+  # Returns [markup, visible word count]; TOC rows and page numbers are
+  # deliberately dropped by the extractor and are not counted as visible.
+  def ten_q_fixture
+    words = 0
+    hidden_fact = ->(i) { "<span style=\"display:none\"><ix:nonFraction name=\"us-gaap:Fact#{i}\">hidden#{i}</ix:nonFraction></span>" }
+    markup = +'<?xml version="1.0" encoding="utf-8"?><html xmlns:ix="http://www.xbrl.org/2013/inlineXBRL">' \
+             "<head><title>itri-20260331</title><style>.hid{display:none}</style></head><body>"
+    markup << '<div style="display:none"><ix:header><ix:hidden>'
+    markup << (1..60).map { |i| "<ix:nonNumeric name=\"dei:Cover#{i}\">hidden#{i}</ix:nonNumeric>" }.join
+    markup << "</ix:hidden><ix:references><link:schemaRef/></ix:references></ix:header></div>"
+    markup << "<p>Table of Contents</p><p>Item 1. Financial Statements 3</p><p>Item 2. Management Discussion 24</p><p>PART II</p>"
+    12.times do |page|
+      markup << "<div style=\"display: none;\">#{hidden_fact.call(1000 + page)}</div>"
+      markup << "<table><tr><td>Revenue</td><td><ix:nonFraction name=\"us-gaap:Revenues\">2,400</ix:nonFraction></td>#{hidden_fact.call(2000 + page)}</tr></table>"
+      words += 1 # "Revenue"; the bare number cell reads as a page number and goes
+      10.times do |para|
+        sentence = "Section #{page} paragraph #{para} explains that product revenue grew because utility demand stayed strong " \
+                   "while gross margin expanded on favourable mix and lower component costs."
+        words += sentence.split.size
+        markup << "<p style=\"margin:0;font-size:10pt\">#{sentence[0, 60]}#{hidden_fact.call(page * 100 + para)}" \
+                  "<span style=\"font-weight:bold\">#{sentence[60..]}</span></p>"
+      end
+      markup << "<p style=\"text-align:center\">#{page + 1}</p><hr/>"
+    end
+    markup << "<p>Signatures 48</p></body></html>"
+    [markup, words]
+  end
+
+  test "an inline-XBRL 10-Q retains more than 80% of its visible words" do
+    markup, visible_words = ten_q_fixture
+    text = Sources::HtmlText.html_to_text(markup)
+    refute_match(/hidden\d+/, text)
+    refute_includes text, "Table of Contents"
+    assert_includes text, "Section 11 paragraph 9 explains that product revenue grew because"
+    retained = text.split.size.to_f / visible_words
+    assert_operator retained, :>, 0.8, "retained #{(retained * 100).round}% of #{visible_words} visible words"
   end
 end
 

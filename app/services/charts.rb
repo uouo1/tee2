@@ -120,21 +120,24 @@ module Charts
   # whose values span three percentage points gets four gridlines and not
   # twenty-seven.
   def nice_ticks(low, high, count = 5)
-    low = low.to_f
-    high = high.to_f
     return [low] if high <= low
 
-    raw = (high - low) / [1, count - 1].max
+    raw = (high - low).fdiv([1, count - 1].max)
     return [low, high] if raw <= 0
 
-    # 10.0 (not 10): an Integer raised to a negative power is a Rational in Ruby.
-    magnitude = 10.0**Math.log10(raw).floor
+    # Python's `10 ** floor(log10(raw))` is an int for raw >= 1 and a float
+    # below it, and the ticks inherit that: a whole-number axis comes back as
+    # Integers (so a caller's format that prints the raw value shows "200",
+    # not "200.0") while a fractional one is Floats. Ruby would hand back a
+    # Rational for an Integer raised to a negative power, hence the 10.0.
+    exponent = Math.log10(raw).floor
+    magnitude = exponent >= 0 ? 10**exponent : 10.0**exponent
     step = magnitude
     [1, 2, 2.5, 5, 10].each do |factor|
       step = magnitude * factor
       break if step >= raw
     end
-    start = (low / step).floor * step
+    start = low.fdiv(step).floor * step
     ticks = []
     value = start
     # Guard against a pathological step producing an unbounded axis.

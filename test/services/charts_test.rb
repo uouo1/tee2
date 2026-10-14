@@ -36,6 +36,9 @@ class ChartsTest < ActiveSupport::TestCase
   test "degenerate range" do
     assert_equal [5], Charts.nice_ticks(5, 5)
     assert_equal [5], Charts.nice_ticks(5, 4)
+    # The caller's own value comes back untouched, Integer or Float.
+    assert_kind_of Integer, Charts.nice_ticks(5, 5).first
+    assert_kind_of Float, Charts.nice_ticks(5.5, 5.5).first
   end
 
   test "tick count is bounded" do
@@ -51,6 +54,20 @@ class ChartsTest < ActiveSupport::TestCase
     assert_equal [-0.5, 0.0, 0.5], Charts.nice_ticks(-0.36, 0.52, 4)
     # Ticks are rounded to six places so accumulated float error never shows.
     Charts.nice_ticks(0.1, 0.9, 9).each { |tick| assert_equal tick, tick.round(6) }
+    # Whole-number steps yield Integers, as the reference's int arithmetic did,
+    # so a format that prints the raw tick shows "200" rather than "200.0";
+    # a fractional step (or the 2.5 factor) yields Floats.
+    assert Charts.nice_ticks(0, 450, 5).all?(Integer)
+    assert Charts.nice_ticks(20.3, 23.3, 4).all?(Integer)
+    assert Charts.nice_ticks(-50, 50, 3).all?(Integer)
+    assert Charts.nice_ticks(0, 1, 5).all?(Float)
+    assert Charts.nice_ticks(0, 10**9, 5).all?(Float)
+    assert_equal [0, 250_000_000.0, 500_000_000.0, 750_000_000.0, 1_000_000_000.0], Charts.nice_ticks(0, 10**9, 5)
+    # Integer bounds never fall into integer division when computing the step.
+    assert_equal [0, 100, 200, 300, 400, 500], Charts.nice_ticks(0, 450, 6)
+    # A raw-tick format sees the same text the Python format string produced.
+    raw = ->(v) { "#{v}x" }
+    assert_includes Charts.column_chart_svg(%w[a b], [100, 400], value_format: raw), ">200x</text>"
   end
 
   # -------------------------------------------------------------- rendering

@@ -443,6 +443,9 @@ module Sources
         fiscal_years: financial_rows.map { |row| row[:fiscal_year] },
         latest_revenue: financial_rows.last&.fetch(:revenue),
         share_price: quote ? quote[:share_price] : nil,
+        # The quote cache refreshes daily; saying which day the price is from
+        # lets a reader tell a fresh load from one served out of the cache.
+        quote_as_of: quote ? quote[:as_of] : nil,
         documents_added: ingested[:added],
         documents_skipped: ingested[:skipped]
       }

@@ -178,11 +178,14 @@ module Sources
       def initialize
         @parts = +""
         @skip_depth = 0
-        # Tags that opened hidden blocks, innermost last. A counter decremented
-        # on any </div> let a hidden <span> swallow the rest of a 10-Q (10 of 14
-        # real filings kept under 10% of their text); un-hiding only when the
-        # opening tag itself closes keeps the paragraph after it.
-        @hidden_stack = []
+        # Open elements as [tag, hidden?], outermost first, plus a count of the
+        # hidden ones so the common path is a single comparison. The reference
+        # kept one counter and decremented it on any </div>, so a hidden <span>
+        # swallowed the rest of a 10-Q (10 of 14 real filings kept under 10% of
+        # their text). Un-hiding only when the tag that opened the hidden block
+        # closes keeps the paragraph after it.
+        @stack = []
+        @hidden = 0
       end
 
       def run(markup)
@@ -269,36 +272,45 @@ module Sources
           @skip_depth += 1
           return
         end
+        # Markup inside <head> or <noscript> is not content either, and a hidden
+        # block opened there must not leak past the skipped element's close.
+        return if @skip_depth.positive?
+
         # Inline XBRL hides a parallel copy of every fact; keep it out of the text.
         style = attributes["style"].to_s.delete(" ").downcase
-        if @hidden_stack.any?
-          # Only a nested copy of the opening tag matters: its close must not
-          # un-hide early. Void tags never close, so they are never pushed.
-          @hidden_stack << tag if tag == @hidden_stack.last && !VOID_TAGS.include?(tag)
-          return
+        hidden = tag == "ix:header" || style.include?("display:none")
+        # Void tags never close, so they never open a block (hidden or not).
+        unless VOID_TAGS.include?(tag)
+          @stack << [tag, hidden]
+          @hidden += 1 if hidden
         end
-        if (tag == "ix:header" || style.include?("display:none")) && !VOID_TAGS.include?(tag)
-          @hidden_stack << tag
-          return
-        end
+        return if @hidden.positive?
+
         @parts << "\n" if BLOCK_TAGS.include?(tag)
         @parts << "\n" if PARAGRAPH_TAGS.include?(tag)
       end
 
       def handle_endtag(tag)
-        if SKIP_TAGS.include?(tag) && @skip_depth.positive?
-          @skip_depth -= 1
+        if SKIP_TAGS.include?(tag)
+          @skip_depth -= 1 if @skip_depth.positive?
           return
         end
-        if @hidden_stack.any?
-          @hidden_stack.pop if tag == @hidden_stack.last
-          return
-        end
+        return if @skip_depth.positive?
+
+        index = @stack.rindex { |(name, _hidden)| name == tag }
+        return if index.nil? # a stray close tag with nothing to close
+
+        # Closing an element closes whatever is still open inside it, as a
+        # browser would: an unclosed hidden <span> ends with its table cell
+        # rather than hiding every page that follows.
+        @stack.pop(@stack.length - index).each { |(_name, hidden)| @hidden -= 1 if hidden }
+        return if @hidden.positive?
+
         @parts << "\n" if BLOCK_TAGS.include?(tag)
       end
 
       def handle_data(data)
-        return if @skip_depth.positive? || @hidden_stack.any?
+        return if @skip_depth.positive? || @hidden.positive?
 
         data = HtmlText.unescape(data)
         return if data.match?(/\A[[:space:]]*\z/)

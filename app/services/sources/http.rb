@@ -28,9 +28,12 @@ module Sources
     MIN_INTERVAL_SECONDS = 0.15
     MAX_ATTEMPTS = 4
     MAX_REDIRECTS = 5
-    # Client errors that will not get better by asking again. Anything else
-    # (429 rate limit, 5xx, timeouts, resets) is retried with backoff.
-    NO_RETRY_STATUSES = [400, 401, 403, 404].freeze
+    # A client error will not get better by asking again, so any 4xx raises at
+    # once — except 429, which is what SEC sends when a client exceeds ten
+    # requests a second and exactly the case backoff exists for. Everything
+    # else (5xx, timeouts, resets) is retried. The reference listed only 400,
+    # 401, 403 and 404; the contract widens that to the whole class.
+    RETRYABLE_CLIENT_STATUSES = [429].freeze
     REDIRECT_STATUSES = [301, 302, 303, 307, 308].freeze
 
     class Error < StandardError; end
@@ -43,6 +46,10 @@ module Sources
         @status = status
         @url = url
         super("HTTP #{status} for #{url}")
+      end
+
+      def client_error?
+        (400..499).cover?(status)
       end
     end
 
@@ -88,7 +95,7 @@ module Sources
             end
             return payload
           rescue HttpError => e
-            raise if NO_RETRY_STATUSES.include?(e.status)
+            raise if e.client_error? && !RETRYABLE_CLIENT_STATUSES.include?(e.status)
 
             last_error = e
           rescue SocketError, SystemCallError, IOError, Timeout::Error, OpenSSL::SSL::SSLError,

@@ -25,6 +25,14 @@ module IngestTestHelpers
     )
   end
 
+  # Transactional tests roll back, but the on-disk test database survives a run
+  # that was killed half-way, and the FTS assertions below are absolute, so
+  # every database test starts from an empty corpus.
+  def purge!
+    Document.destroy_all
+    Company.destroy_all
+  end
+
   def with_corpus_dir
     Dir.mktmpdir("ingest", Rails.root.join("tmp").to_s) { |dir| yield Pathname(dir) }
   end
@@ -146,6 +154,7 @@ class IngestDocumentTest < ActiveSupport::TestCase
   include IngestTestHelpers
 
   setup do
+    purge!
     @doc = SAMPLE_DOC.dup
   end
 
@@ -224,7 +233,8 @@ class IngestDocumentTest < ActiveSupport::TestCase
     assert_equal Date.new(2026, 9, 3), other.published_at
     assert_equal ["2026-09"], other.kpis.pluck(:period).uniq
 
-    assert_raises(ArgumentError) { Ingest.ingest_document(@doc.merge(external_id: "doc-3", published_at: "yesterday")) }
+    error = assert_raises(ArgumentError) { Ingest.ingest_document(@doc.merge(external_id: "doc-3", published_at: "yesterday")) }
+    assert_match(/ISO date/, error.message)
   end
 
   test "explicit period wins for kpis" do
@@ -296,16 +306,21 @@ class IngestDocumentTest < ActiveSupport::TestCase
     assert_nil Ingest.ingest_document(attrs)
   end
 
-  test "a document that fails validation leaves no chunks behind" do
-    # doc_type is required by the model too; bypass the early check with a
-    # body that is fine but a title that only the model rejects (too-long title
-    # is not enforced, so force a failure through an invalid company id).
-    assert_raises(ActiveRecord::RecordInvalid) do
+  test "a document the database rejects leaves nothing behind" do
+    # A dangling company_id trips the foreign key (Python: sqlite3.IntegrityError),
+    # the earliest point the pipeline can fail once the field check has passed.
+    assert_raises(ActiveRecord::InvalidForeignKey) do
       Ingest.ingest_document(@doc.merge(company_id: 999_999))
     end
     assert_equal 0, Document.count
     assert_equal 0, Chunk.count
     assert_equal [], fts_rowids("margin")
+  end
+
+  test "a blank company_id, as an empty CSV cell gives, falls back to ticker resolution" do
+    document = Ingest.ingest_document(@doc.merge(company_id: ""))
+    assert_equal "NVG", document.company.ticker
+    assert_equal document.company_id, document.kpis.first.company_id
   end
 end
 
@@ -319,11 +334,6 @@ class IngestManyTest < ActiveSupport::TestCase
 
   setup { purge! }
   teardown { purge! }
-
-  def purge!
-    Document.destroy_all
-    Company.delete_all
-  end
 
   test "counts added and skipped" do
     a = SAMPLE_DOC.merge(external_id: "a1")
@@ -352,6 +362,8 @@ end
 
 class IngestFilesTest < ActiveSupport::TestCase
   include IngestTestHelpers
+
+  setup { purge! }
 
   test "reads json jsonl and directory" do
     result = with_corpus_dir do |root|
@@ -408,9 +420,12 @@ class IngestFilesTest < ActiveSupport::TestCase
       assert_equal({ title: "Q3 Call-Notes.V2", doc_type: "memo", published_at: "1970-01-01",
                      source: "q3_call-notes.v2.md", body: "Hello world.\n\nSecond para.\n" }, memo)
       assert_equal "Plain", Ingest.read_documents(root.join("plain.txt")).first[:title]
+      # \r\n became \n, so the file still splits into two paragraphs; both are
+      # under MIN_CHUNK_CHARS and therefore glued into one chunk, as in Python.
+      assert_equal ["Hello world.", "Second para."], Ingest.split_paragraphs(memo[:body])
       document = Ingest.ingest_document(memo)
       assert_equal Date.new(1970, 1, 1), document.published_at
-      assert_equal 2, document.chunks.size
+      assert_equal ["Hello world. Second para."], document.chunks.map(&:text)
     end
   end
 
@@ -455,6 +470,18 @@ class IngestFilesTest < ActiveSupport::TestCase
       assert_equal({ added: 1, skipped: 0, files: 1 }, Ingest.ingest_path(root.join("one.json")))
       assert_equal({ added: 0, skipped: 0, files: 0 }, Ingest.ingest_path(root.join("companies.json")))
     end
+  end
+
+  test "ingest_path walks files in path-component order, dotfiles included, like sorted(rglob)" do
+    with_corpus_dir do |root|
+      root.join("a").mkdir
+      write_json(root.join("a", "z.json"), [{ title: "a/z", doc_type: "news", published_at: "2026-01-01", body: "Demand held." }])
+      write_json(root.join("a-b.json"), [{ title: "a-b", doc_type: "news", published_at: "2026-01-01", body: "Demand held." }])
+      write_json(root.join(".hidden.json"), [{ title: "hidden", doc_type: "news", published_at: "2026-01-01", body: "Demand held." }])
+      assert_equal({ added: 3, skipped: 0, files: 3 }, Ingest.ingest_path(root))
+    end
+    # "a/z.json" sorts before "a-b.json" by components even though "/" > "-" as a character
+    assert_equal ["hidden", "a/z", "a-b"], Document.order(:id).pluck(:title)
   end
 
   test "ingested files populate the search index" do
