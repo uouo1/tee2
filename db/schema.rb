@@ -205,6 +205,4 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_13_030000) do
   add_foreign_key "slides", "pitchbooks", on_delete: :cascade
   add_foreign_key "watchlist_items", "companies", on_delete: :cascade
   add_foreign_key "watchlist_items", "watchlists", on_delete: :cascade
-
-  # Virtual tables defined in this database.
-  # Note that virtual tables may not work with other database engines. Be careful if changing database.
+end

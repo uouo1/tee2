@@ -4,5 +4,5 @@
 # it has nothing to do with database transactions.
 class Transaction < ApplicationRecord
   validates :announced_on, :target, :acquirer, presence: true
-  scope :newest_first, -> { order(announced_on: :desc) }
+  scope :newest_first, -> { order(announced_on: :desc, id: :desc) }
 end
