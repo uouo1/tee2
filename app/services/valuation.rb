@@ -52,7 +52,7 @@ module Valuation
       median: percentile(clean, 0.5),
       p75: percentile(clean, 0.75),
       max: clean.max,
-      mean: clean.inject(0.0, :+) / clean.size # naive left-to-right sum, as Python's sum()
+      mean: fsum(clean) / clean.size
     }
   end
 
@@ -98,6 +98,11 @@ module Valuation
       as_of: market&.as_of,
       share_price: price,
       shares_diluted: shares,
+      # The cover-page count travels with the diluted weighted-average so the
+      # company page and comps table can say which basis the per-share figures
+      # rest on (they are equal when the filer reported no diluted count and
+      # the loader fell back). Nil when no market data was loaded.
+      shares_basic: market&.shares_basic&.to_f,
       net_debt: net_debt,
       market_cap: rnd(market_cap, 1),
       enterprise_value: enterprise_value.nil? ? nil : rnd(enterprise_value, 1),
@@ -130,6 +135,8 @@ module Valuation
         market_cap: metrics[:market_cap],
         enterprise_value: metrics[:enterprise_value],
         net_debt: metrics[:net_debt],
+        shares_diluted: metrics[:shares_diluted],
+        shares_basic: metrics[:shares_basic],
         revenue: rnd(latest[:revenue], 1),
         ebitda: rnd(latest[:ebitda], 1),
         ebitda_margin: latest[:ebitda_margin],
@@ -442,7 +449,7 @@ module Valuation
     nwc_ratios = actuals.last(3).filter_map do |f|
       f[:nwc_change].to_f / f[:revenue].to_f if !f[:nwc_change].nil? && number?(f[:revenue])
     end
-    nwc_pct = nwc_ratios.empty? ? 0.012 : nwc_ratios.inject(0.0, :+) / nwc_ratios.size
+    nwc_pct = nwc_ratios.empty? ? 0.012 : fsum(nwc_ratios) / nwc_ratios.size
     nwc_pct = nwc_pct.clamp(-0.03, 0.05)
 
     filed_tax = latest[:tax_rate]
@@ -484,6 +491,25 @@ module Valuation
 
   def round_stats(stats, digits = 2)
     stats.transform_values { |v| v.is_a?(Float) ? rnd(v, digits) : v }
+  end
+
+  # CPython's `sum()` of floats has been Neumaier-compensated since 3.12, so
+  # the reference mean of [0.1] * 10 is exactly 0.1 where a naive left-to-right
+  # sum gives 0.09999999999999999. Reproduce it wherever the Python calls
+  # `sum()` so statistics agree with the reference to the last digit (it is
+  # also simply the more accurate figure).
+  def fsum(values)
+    total = 0.0
+    compensation = 0.0
+    values.each do |value|
+      x = value.to_f
+      t = total + x
+      compensation += total.abs >= x.abs ? (total - t) + x : (x - t) + total
+      total = t
+    end
+    # Like CPython: skip the correction when it is zero or would turn an
+    # infinite sum into NaN.
+    compensation != 0.0 && compensation.finite? ? total + compensation : total
   end
 
   # Python truthiness for a numeric: nil and zero are both "missing".
@@ -530,5 +556,6 @@ module Valuation
     }
   end
 
-  private_class_method :rnd, :round_stats, :number?, :num_or, :to_assumptions, :multiples_for, :valuation_range
+  private_class_method :rnd, :round_stats, :fsum, :number?, :num_or, :to_assumptions, :multiples_for,
+                       :valuation_range
 end

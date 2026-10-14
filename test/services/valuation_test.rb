@@ -144,6 +144,13 @@ class ValuationStatisticsTest < ActiveSupport::TestCase
     assert_in_delta 2.0, stats[:mean], 1e-9
   end
 
+  test "mean is compensated like the reference's sum()" do
+    # CPython >= 3.12 sums floats with Neumaier compensation; a naive
+    # left-to-right sum would report 0.09999999999999999 and 0.0 here.
+    assert_equal 0.1, Valuation.describe([0.1] * 10)[:mean]
+    assert_equal 1.0 / 3, Valuation.describe([1e16, 1.0, -1e16])[:mean]
+  end
+
   test "describe of nothing is all nils with a zero count" do
     assert_equal({ count: 0, min: nil, p25: nil, median: nil, p75: nil, max: nil, mean: nil },
                  Valuation.describe([nil]))
@@ -198,6 +205,17 @@ class ValuationCompanyMetricsTest < ActiveSupport::TestCase
     assert_equal 0.262, metrics[:latest_actual][:ebitda_margin]
     assert_equal Date.new(2026, 10, 9), metrics[:as_of]
     assert_equal "USD", metrics[:currency]
+  end
+
+  test "the share-count basis is exposed so views can label it" do
+    # The demo set loads no cover-page count; a filer that reports both keeps
+    # them distinct, and one with no diluted count stores the same number twice.
+    assert_nil Valuation.company_metrics("NVG")[:shares_basic]
+    Company.find_ticker("NVG").market_datum.update!(shares_basic: 175.5)
+    metrics = Valuation.company_metrics("NVG")
+    assert_equal [182.0, 175.5], [metrics[:shares_diluted], metrics[:shares_basic]]
+    row = Valuation.comps_table(%w[NVG])[:rows].first
+    assert_equal [182.0, 175.5], [row[:shares_diluted], row[:shares_basic]]
   end
 
   test "financials are symbol keyed rows in fiscal year order" do
@@ -269,8 +287,9 @@ class ValuationCompsTest < ActiveSupport::TestCase
 
   test "rows carry the inputs behind each multiple" do
     row = Valuation.comps_table(%w[HLDX])[:rows].first
-    assert_equal %i[ticker name country share_price market_cap enterprise_value net_debt revenue ebitda
-                    ebitda_margin ev_revenue ev_ebitda pe fiscal_year], row.keys
+    assert_equal %i[ticker name country share_price market_cap enterprise_value net_debt shares_diluted shares_basic
+                    revenue ebitda ebitda_margin ev_revenue ev_ebitda pe fiscal_year], row.keys
+    assert_equal 141.0, row[:shares_diluted]
     assert_equal 1320.0, row[:revenue]
     assert_equal 2026, row[:fiscal_year]
   end
@@ -331,6 +350,14 @@ class ValuationImpliedValueTest < ActiveSupport::TestCase
     implied = Valuation.implied_from_multiple(12, 10, metric_value: 100, kind: "ev", net_debt: 0, shares: 10)
     assert_operator implied[:low], :<, implied[:high]
     assert_equal 10.0, implied[:multiple_low]
+  end
+
+  test "outputs round half to even on exact ties, as the reference does" do
+    # 0.125 and 0.375 are exact in binary, so Python's round() lands on the
+    # even neighbour (0.12, 0.38); Ruby's Float#round would give 0.13 and 0.38.
+    implied = Valuation.implied_from_multiple(1, 3, metric_value: 0.125, kind: "equity", net_debt: 0, shares: 1)
+    assert_equal({ low: 0.12, high: 0.38, mid: 0.25, multiple_low: 1.0, multiple_high: 3.0, metric_value: 0.1 },
+                 implied)
   end
 
   test "missing inputs return nil" do
@@ -624,6 +651,10 @@ class ValuationFootballFieldTest < ActiveSupport::TestCase
     assert_equal [30.2, 45.11], [comps[:low], comps[:high]]
     assert_equal "12.25x–17.88x on FY2026 EBITDA of 482", comps[:basis]
     assert_equal 482.1, comps[:detail][:metric_value]
+    # The bar's mid is recomputed from the rounded ends (37.655 -> 37.66) while
+    # the detail keeps the unrounded mid (37.65), exactly as the reference does.
+    assert_equal 37.66, comps[:mid]
+    assert_equal 37.65, comps[:detail][:mid]
     revenue = by_method["Trading comps — EV/Revenue"]
     assert_equal [24.13, 38.19], [revenue[:low], revenue[:high]]
     assert_equal "2.61x–4.0x on FY2026 revenue of 1840", revenue[:basis]
