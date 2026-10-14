@@ -175,8 +175,12 @@ module Charts
     axis_min = lows.min * 0.92
     axis_max = highs.max * 1.06
     ticks = nice_ticks(axis_min, axis_max, 6)
-    axis_min = [axis_min, ticks.first].min
-    axis_max = [axis_max, ticks.last].max
+    # Both bounds as Floats: when the padded range snaps to whole-number ticks on
+    # both ends (say [20, 70]) the Integer ticks win the min/max, and
+    # Integer / Integer in x_of would truncate every tick to x = plot_left. The
+    # Python reference never had the problem because its `/` is true division.
+    axis_min = [axis_min, ticks.first].min.to_f
+    axis_max = [axis_max, ticks.last].max.to_f
 
     x_of = ->(value) { plot_left + (value - axis_min) / (axis_max - axis_min) * plot_width }
 

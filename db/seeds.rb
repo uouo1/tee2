@@ -1,9 +1,10 @@
-# This file should ensure the existence of records required to run the application in every environment (production,
-# development, test). The code here should be idempotent so that it can be executed at any point in every environment.
-# The data can then be loaded with the bin/rails db:seed command (or created alongside the database with db:setup).
-#
-# Example:
-#
-#   ["Action", "Comedy", "Drama", "Horror"].each do |genre_name|
-#     MovieGenre.find_or_create_by!(name: genre_name)
-#   end
+# frozen_string_literal: true
+
+# Loads the fictional demo corpus (seven grid-software companies, six precedent
+# transactions and ~116 documents) so the research index, comps screen and
+# valuation models work out of the box. Idempotent: `bin/rails db:seed` can be
+# run again at any time; it refreshes company fundamentals and skips documents
+# that are already present. Replace it with a real corpus via `argos:ingest[path]`
+# or `argos:load_sec[tickers]`.
+summary = Seed::Demo.seed!
+puts JSON.generate(summary)

@@ -119,6 +119,24 @@ class ChartsTest < ActiveSupport::TestCase
     assert_equal 2, Charts::GAP
   end
 
+  test "football field axis survives whole-number ticks at both ends" do
+    # 27 * 0.92 = 24.84 and 62 * 1.06 = 65.72 give a step of 10 and the ticks
+    # [20, 30, 40, 50, 60, 70], which overshoot the padded range at both ends,
+    # so both axis bounds come from the Integer ticks. The gridlines must still
+    # spread across the plot: Integer division once collapsed all of them onto
+    # the left edge (x = 232) while the Python reference spread them.
+    svg = Charts.football_field_svg([{ method: "DCF", low: 27.0, high: 62.0 }])
+    xs = svg.scan(/<line x1="([\d.]+)" y1="24"/).flatten.map(&:to_f)
+    assert_equal 6, xs.size
+    assert_equal xs.sort, xs
+    assert_equal xs.size, xs.uniq.size
+    # plot_left 232, plot_width 472: $30 sits a fifth of the way along [20, 70].
+    assert_in_delta 232 + 472 * 0.2, xs[1], 0.11
+    assert_includes svg, %(<text x="326.4" y="96" fill="var(--muted)")
+    # The bar itself: 27 -> 298.08, 62 -> 628.48, minus the 2px gap.
+    assert_includes svg, %(<rect x="298.1" y="47.0" width="328.4" height="18" rx="4")
+  end
+
   test "charts use tokens not literal hex" do
     svg = Charts.football_field_svg(RANGES, reference_price: 44.1)
     assert_includes svg, "var(--series-1)"
