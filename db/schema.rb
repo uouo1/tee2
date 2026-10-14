@@ -10,7 +10,15 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_10_13_030000) do
+ActiveRecord::Schema[8.1].define(version: 2026_10_14_060000) do
+  create_table "backtest_runs", force: :cascade do |t|
+    t.string "name", null: false
+    t.text "params", default: "{}", null: false
+    t.text "results", default: "{}", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+  end
+
   create_table "chunks", force: :cascade do |t|
     t.integer "document_id", null: false
     t.integer "seq", null: false
@@ -126,6 +134,22 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_13_030000) do
     t.index ["company_id"], name: "index_market_data_on_company_id", unique: true
   end
 
+  create_table "pit_facts", force: :cascade do |t|
+    t.integer "cik", null: false
+    t.string "ticker"
+    t.string "concept", null: false
+    t.integer "fiscal_year"
+    t.date "period_start"
+    t.date "period_end", null: false
+    t.float "value", null: false
+    t.date "filed", null: false
+    t.string "accession"
+    t.string "form"
+    t.string "tag"
+    t.index ["cik", "concept", "filed"], name: "index_pit_facts_on_cik_and_concept_and_filed"
+    t.index ["cik", "concept", "period_end", "filed"], name: "index_pit_facts_on_cik_and_concept_and_period_end_and_filed", unique: true
+  end
+
   create_table "pitchbooks", force: :cascade do |t|
     t.string "title", null: false
     t.string "subtitle"
@@ -137,6 +161,16 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_13_030000) do
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
     t.index ["target_company_id"], name: "index_pitchbooks_on_target_company_id"
+  end
+
+  create_table "price_bars", force: :cascade do |t|
+    t.string "ticker", null: false
+    t.date "month_end", null: false
+    t.float "close"
+    t.float "adj_close"
+    t.string "source"
+    t.boolean "adjusted", default: true
+    t.index ["ticker", "month_end"], name: "index_price_bars_on_ticker_and_month_end", unique: true
   end
 
   create_table "saved_searches", force: :cascade do |t|
@@ -171,6 +205,23 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_13_030000) do
     t.float "premium_1day"
     t.string "consideration"
     t.text "note"
+  end
+
+  create_table "universe_members", force: :cascade do |t|
+    t.integer "cik", null: false
+    t.string "ticker"
+    t.string "name"
+    t.string "sic"
+    t.string "sic_description"
+    t.string "exchange"
+    t.string "loc"
+    t.float "revenue_anchor"
+    t.integer "anchor_year", null: false
+    t.boolean "has_prices", default: false
+    t.string "dropout_reason"
+    t.datetime "selected_at"
+    t.index ["anchor_year", "cik"], name: "index_universe_members_on_anchor_year_and_cik", unique: true
+    t.index ["ticker"], name: "index_universe_members_on_ticker"
   end
 
   create_table "watchlist_items", id: false, force: :cascade do |t|

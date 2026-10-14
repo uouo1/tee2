@@ -31,3 +31,4 @@ data/cache/
 /config/master.key
 /config/credentials/*.key
 .byebug_history
+/data/backtest/*.log
