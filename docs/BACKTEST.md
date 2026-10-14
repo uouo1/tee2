@@ -140,11 +140,14 @@ share from `Valuation.run_dcf` with inputs from the point-in-time facts, as
 
 ```
 backtest:universe[anchor_year,size]   build universe_members
-backtest:fundamentals                 fill pit_facts for every member
-backtest:prices                       fill price_bars for every member with a ticker
-backtest:run[name]                    evaluate; prints the JSON summary; writes docs/backtests/<name>.md
-backtest:all[anchor_year,size]        the four in order
+backtest:fundamentals[anchor_year]    fill pit_facts for every member
+backtest:prices[anchor_year]          fill price_bars for every member with a ticker
+backtest:acquire[anchor_year,size]    the three in order
+backtest:run[name,anchor_year]        evaluate; prints the JSON summary; writes docs/backtests/<name>.md + SVGs
 ```
+
+Progress goes to stderr; a 600-name acquisition is roughly 1,800 requests and
+takes 15–25 minutes the first time, seconds afterwards from the cache.
 
 ## File ownership
 
