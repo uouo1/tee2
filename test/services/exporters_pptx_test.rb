@@ -525,6 +525,40 @@ class ExportersPptxTest < ActiveSupport::TestCase
     assert_includes @entries["ppt/slides/slide12.xml"], %(sz="900")
   end
 
+  test "unformatted cells print Python-falsy values as empty, formatted cells only treat nil specially" do
+    # `str(row.get(key, "") or "")` in the Python: 0, False and "" are blank cells
+    # in a text column, while `_fmt(0)` in a numeric column is still "0".
+    slide = SlideFixture.new(kind: "buyers", title: "Buyers", subtitle: nil, payload_hash: { candidates: [
+      { name: "", ticker: "X", type: 0, enterprise_value: 0, relative_size: nil, rationale: false },
+      { name: "Zero Co", type: "0", enterprise_value: 12.0, relative_size: 0, rationale: [] }
+    ] })
+    parts = Exporters::Pptx.build(Deck.new(title: "Falsy", slides: [slide])).parts
+    rows = tables_in(parts["ppt/slides/slide1.xml"]).first
+    assert_equal ["", "", "0", "n/a", ""], rows[1]
+    assert_equal ["Zero Co", "0", "12", "0.00x", ""], rows[2] # the string "0" is truthy, as in Python
+  end
+
+  test "writes a Pitchbook record: slides come from the association and payloads from the stored JSON" do
+    pitchbook = Pitchbook.create!(title: "Project Record", client_name: "Board")
+    pitchbook.slides.create!(
+      seq: 0, kind: "cover", title: "Project Record", subtitle: "From the database",
+      payload: JSON.generate(client_name: "Board", target: "Northvale Grid Software", ticker: "NVG", date: "14 October 2026")
+    )
+    pitchbook.slides.create!(
+      seq: 1, kind: "valuation_summary", title: "Valuation summary", subtitle: "USD",
+      payload: JSON.generate(ranges: RANGES.first(2), reference_price: 85.57, currency: CURRENCY)
+    )
+    pitchbook.slides.create!(seq: 2, kind: "process", title: "Process", payload: JSON.generate(bullets: ["Agree the comp set."]))
+
+    path = Exporters::Pptx.write(Pitchbook.find(pitchbook.id), File.join(@dir, "record.pptx"))
+    entries = read_zip(path)
+    assert_equal 3, entries.keys.count { |k| k.start_with?("ppt/slides/slide") && k.end_with?(".xml") }
+    assert_includes entries["ppt/slides/slide1.xml"], "<a:t>Prepared for Board · Northvale Grid Software · NVG · 14 October 2026</a:t>"
+    assert_includes entries["ppt/charts/chart1.xml"], "<c:v>Trading comps — EV/Revenue</c:v>"
+    assert_includes entries["ppt/slides/slide3.xml"], "<a:t>•  Agree the comp set.</a:t>"
+    assert_includes entries["docProps/core.xml"], "<dc:title>Project Record</dc:title>"
+  end
+
   test "evidence appendix quotes each pinned item with its provenance and escapes markup in quotes" do
     texts = texts_of(14)
     assert_includes texts, "•  “Backlog at quarter end was $4.4 billion.”"
@@ -606,25 +640,49 @@ class ExportersPptxTest < ActiveSupport::TestCase
 
   # --------------------------------------------------- python-pptx check
 
-  test "python-pptx opens the deck and reports the expected slide, chart and table counts" do
+  test "python-pptx opens the deck and reads back the expected slides, charts, series and tables" do
+    # Verification only (the contract forbids Python at runtime): a second,
+    # independent OOXML reader must open the file, and reading the chart caches
+    # and the embedded workbooks back is what a renderer does before it draws.
     script = <<~PY
       from pptx import Presentation
-      import sys
+      import io, json, sys, zipfile
       p = Presentation(sys.argv[1])
-      slides = len(p.slides._sldIdLst)
-      charts = sum(1 for s in p.slides for sh in s.shapes if sh.has_chart)
-      tables = sum(1 for s in p.slides for sh in s.shapes if sh.has_table)
-      print(slides, charts, tables)
+      report = {"slides": len(p.slides._sldIdLst), "charts": [], "tables": 0}
+      for s in p.slides:
+          for sh in s.shapes:
+              if sh.has_chart:
+                  ch = sh.chart
+                  plot = ch.plots[0]
+                  report["charts"].append([
+                      str(ch.chart_type).split()[0], len(list(plot.categories)),
+                      [[se.name, len(list(se.values))] for se in plot.series], ch.has_legend,
+                  ])
+                  wb = zipfile.ZipFile(io.BytesIO(ch.part.chart_workbook.xlsx_part.blob))
+                  assert wb.testzip() is None and "xl/worksheets/sheet1.xml" in wb.namelist()
+              elif sh.has_table:
+                  report["tables"] += 1
+      print(json.dumps(report))
     PY
     output, status = Open3.capture2e("python3", "-I", "-c", "import pptx", { chdir: @dir })
     skip "python-pptx not available for verification (#{output.strip})" unless status.success?
 
     output, status = Open3.capture2e("python3", "-I", "-c", script, @path.to_s, { chdir: @dir })
     assert status.success?, "python-pptx failed to open the deck: #{output}"
-    slides, charts, tables = output.split.map(&:to_i)
-    assert_equal FIXTURE_SLIDES.size, slides
-    assert_equal CHART_SLIDES.values.sum, charts
-    assert_operator tables, :>=, 5
+    report = JSON.parse(output.lines.last)
+    assert_equal FIXTURE_SLIDES.size, report["slides"]
+    assert_equal CHART_SLIDES.values.sum, report["charts"].size
+    # Chart type, category count, [series name, point count] and no legend — the
+    # nil FY2021 margin still counts as a point (ptCount spans every category).
+    assert_equal [
+      ["LINE_MARKERS", 9, [["Mean tone", 9]], false],
+      ["COLUMN_CLUSTERED", 6, [["Revenue (USDm)", 6]], false],
+      ["LINE_MARKERS", 6, [["EBITDA margin", 6]], false],
+      ["BAR_STACKED", 4, [["Base", 4], ["Range", 4]], false],
+      ["COLUMN_CLUSTERED", 5, [["Unlevered FCF (USDm)", 5]], false]
+    ], report["charts"]
+    # KPI, themes, financials, comps x2, precedents, bridge + projections, sensitivity, buyers.
+    assert_equal 10, report["tables"]
   end
 
   private
@@ -668,9 +726,10 @@ class ExportersPptxTest < ActiveSupport::TestCase
   end
 
   # Each table on slide `number` as rows of cell text.
-  def tables_of(number)
-    doc = parse_xml(@entries["ppt/slides/slide#{number}.xml"])
-    doc.xpath("//a:tbl", NS).map do |table|
+  def tables_of(number) = tables_in(@entries["ppt/slides/slide#{number}.xml"])
+
+  def tables_in(slide_xml)
+    parse_xml(slide_xml).xpath("//a:tbl", NS).map do |table|
       table.xpath("./a:tr", NS).map do |row|
         row.xpath("./a:tc", NS).map { |cell| cell.xpath(".//a:t", NS).map(&:text).join }
       end

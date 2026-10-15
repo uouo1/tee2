@@ -180,8 +180,10 @@ module Sources
     # the cover-page count under a "diluted" label understated them by ~6% for
     # Itron (43.79m vs 46.32m). `basic` is the cover-page count. Multi-class
     # filers (Watts Water, for one) report the cover-page count per class as
-    # dimensional facts, which the companyfacts feed omits, so each side falls
-    # back to the other when it is missing.
+    # dimensional facts, which the companyfacts feed omits, so `diluted` falls
+    # back to the cover page. `basic` stays nil without a cover page rather than
+    # borrowing the weighted count: the company page and comps table label which
+    # count they show, and a borrowed one would be labelled wrongly.
     def shares(facts)
       cover = cover_shares(facts)
       cover = nil if cover&.zero?
@@ -230,15 +232,15 @@ module Sources
         rows << {
           fiscal_year: year,
           is_estimate: false,
-          revenue: (revenue / 1e6).round(1),
-          ebitda: ebitda ? (ebitda / 1e6).round(1) : nil,
-          ebit: operating_income ? (operating_income / 1e6).round(1) : nil,
-          net_income: series[:net_income].key?(year) ? (series[:net_income][year] / 1e6).round(1) : nil,
-          eps: eps.key?(year) ? eps[year].round(2) : nil,
-          dep_amort: dep_amort ? (dep_amort / 1e6).round(1) : nil,
-          capex: series[:capex].key?(year) ? (series[:capex][year] / 1e6).round(1) : nil,
-          nwc_change: nwc_change ? nwc_change.round(1) : nil,
-          tax_rate: tax_rate ? tax_rate.round(4) : nil
+          revenue: py_round(revenue / 1e6, 1),
+          ebitda: ebitda ? py_round(ebitda / 1e6, 1) : nil,
+          ebit: operating_income ? py_round(operating_income / 1e6, 1) : nil,
+          net_income: series[:net_income].key?(year) ? py_round(series[:net_income][year] / 1e6, 1) : nil,
+          eps: eps.key?(year) ? py_round(eps[year], 2) : nil,
+          dep_amort: dep_amort ? py_round(dep_amort / 1e6, 1) : nil,
+          capex: series[:capex].key?(year) ? py_round(series[:capex][year] / 1e6, 1) : nil,
+          nwc_change: nwc_change ? py_round(nwc_change, 1) : nil,
+          tax_rate: tax_rate ? py_round(tax_rate, 4) : nil
         }
       end
       rows
@@ -267,7 +269,7 @@ module Sources
       return nil if cash.nil? && debt.zero?
 
       liquid = (cash || 0.0) + balance[:short_term_investments].fetch(fiscal_year, 0.0)
-      ((debt - liquid) / 1e6).round(1)
+      py_round((debt - liquid) / 1e6, 1)
     end
 
     # --------------------------------------------------------------- documents
@@ -418,8 +420,8 @@ module Sources
             company: company,
             as_of: quote[:as_of] || Date.today,
             share_price: quote[:share_price],
-            shares_diluted: (share_counts[:diluted] / 1e6).round(2), # millions, as elsewhere
-            shares_basic: share_counts[:basic] ? (share_counts[:basic] / 1e6).round(2) : nil,
+            shares_diluted: py_round(share_counts[:diluted] / 1e6, 2), # millions, as elsewhere
+            shares_basic: share_counts[:basic] ? py_round(share_counts[:basic] / 1e6, 2) : nil,
             net_debt: latest_year ? net_debt(facts, latest_year) : nil,
             week52_low: quote[:week52_low],
             week52_high: quote[:week52_high],
@@ -498,6 +500,20 @@ module Sources
         end
       end
       { added: added, rows: rows.size }
+    end
+
+    # Python's round(x, n) rounds the *exact* binary value half-to-even; Ruby's
+    # Float#round rounds the shortest decimal rendering half-up, so figures
+    # reported in thousands land on a tie once in a hundred and drift by 0.1m
+    # (1,234,550 thousand -> 1234.6 here, 1234.5 in the reference). The stored
+    # fundamentals must match the Python loader to the last digit, as Nlp and
+    # Valuation already do, so every rounded output goes through here.
+    def py_round(value, digits)
+      float = value.to_f
+      return float unless float.finite?
+
+      scale = 10**digits
+      Rational((float.to_r * scale).round(half: :even), scale).to_f
     end
   end
 end

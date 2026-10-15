@@ -178,11 +178,19 @@ module Exporters
         highlighted = highlight_key ? row[highlight_key].present? : false
         columns.map do |column|
           value = row[column[:key]]
-          text = column[:format] ? fmt(value, column[:format]) : (value.nil? || value == false ? "" : value.to_s)
+          text = column[:format] ? fmt(value, column[:format]) : (python_falsy?(value) ? "" : value.to_s)
           { text: text, size: font_size, bold: highlighted, color: INK, align: column[:numeric] ? "r" : nil }
         end
       end
       page.table(left, top, width, height, [header, *body])
+    end
+
+    # An unformatted cell is `str(row.get(key, "") or "")` in the Python, so
+    # anything falsy there — None, False, 0, "", an empty list or dict — prints
+    # as an empty cell rather than "0" or "false". Formatted cells go through
+    # `fmt`, where only nil is special.
+    def python_falsy?(value)
+      value.nil? || value == false || value == 0 || (value.respond_to?(:empty?) && value.empty?)
     end
 
     def note(page, text, top:)

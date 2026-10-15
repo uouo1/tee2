@@ -37,10 +37,10 @@ module Sources
       high = truthy(meta[:fiftyTwoWeekHigh]) || closes.max
       {
         ticker: meta.fetch(:symbol, ticker.upcase),
-        share_price: price.to_f.round(2),
+        share_price: py_round(price, 2),
         currency: meta.fetch(:currency, "USD"),
-        week52_low: truthy(low) ? low.to_f.round(2) : nil,
-        week52_high: truthy(high) ? high.to_f.round(2) : nil,
+        week52_low: truthy(low) ? py_round(low, 2) : nil,
+        week52_high: truthy(high) ? py_round(high, 2) : nil,
         as_of: as_of(meta),
         exchange: meta[:fullExchangeName]
       }
@@ -63,6 +63,17 @@ module Sources
       return nil if stamp.nil? || stamp == 0
 
       Time.at(Integer(stamp)).utc.to_date
+    end
+
+    # Python's round(): the exact binary value, half-to-even (80.125 -> 80.12,
+    # where Float#round says 80.13). Same rule as Sec.py_round; a quote is a
+    # stored figure too, so it must match the reference loader.
+    def py_round(value, digits)
+      float = value.to_f
+      return float unless float.finite?
+
+      scale = 10**digits
+      Rational((float.to_r * scale).round(half: :even), scale).to_f
     end
   end
 end

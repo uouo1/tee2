@@ -94,7 +94,30 @@ module Sources
       "euro" => "€", "trade" => "™", "larr" => "←", "uarr" => "↑", "rarr" => "→", "darr" => "↓",
       "minus" => "−", "lowast" => "∗", "radic" => "√", "infin" => "∞", "ne" => "≠", "le" => "≤",
       "ge" => "≥", "loz" => "◊", "ensp" => " ", "emsp" => " ", "thinsp" => " ",
-      "zwnj" => "‌", "zwj" => "‍", "lrm" => "‎", "rlm" => "‏"
+      "zwnj" => "‌", "zwj" => "‍", "lrm" => "‎", "rlm" => "‏",
+      # The rest of the HTML 4 set — Greek letters, mathematical operators,
+      # arrows and card suits — which footnotes and formula-heavy filings
+      # (variable-rate debt, option-pricing inputs) reach for.
+      "fnof" => "ƒ", "circ" => "ˆ", "tilde" => "˜", "OElig" => "Œ", "oelig" => "œ", "Scaron" => "Š",
+      "scaron" => "š", "Yuml" => "Ÿ", "frasl" => "⁄", "weierp" => "℘", "image" => "ℑ", "real" => "ℜ",
+      "alefsym" => "ℵ", "harr" => "↔", "crarr" => "↵", "lArr" => "⇐", "uArr" => "⇑", "rArr" => "⇒",
+      "dArr" => "⇓", "hArr" => "⇔",
+      "Alpha" => "Α", "Beta" => "Β", "Gamma" => "Γ", "Delta" => "Δ", "Epsilon" => "Ε", "Zeta" => "Ζ",
+      "Eta" => "Η", "Theta" => "Θ", "Iota" => "Ι", "Kappa" => "Κ", "Lambda" => "Λ", "Mu" => "Μ",
+      "Nu" => "Ν", "Xi" => "Ξ", "Omicron" => "Ο", "Pi" => "Π", "Rho" => "Ρ", "Sigma" => "Σ",
+      "Tau" => "Τ", "Upsilon" => "Υ", "Phi" => "Φ", "Chi" => "Χ", "Psi" => "Ψ", "Omega" => "Ω",
+      "alpha" => "α", "beta" => "β", "gamma" => "γ", "delta" => "δ", "epsilon" => "ε", "zeta" => "ζ",
+      "eta" => "η", "theta" => "θ", "iota" => "ι", "kappa" => "κ", "lambda" => "λ", "mu" => "μ",
+      "nu" => "ν", "xi" => "ξ", "omicron" => "ο", "pi" => "π", "rho" => "ρ", "sigmaf" => "ς",
+      "sigma" => "σ", "tau" => "τ", "upsilon" => "υ", "phi" => "φ", "chi" => "χ", "psi" => "ψ",
+      "omega" => "ω", "thetasym" => "ϑ", "upsih" => "ϒ", "piv" => "ϖ",
+      "forall" => "∀", "part" => "∂", "exist" => "∃", "empty" => "∅", "nabla" => "∇", "isin" => "∈",
+      "notin" => "∉", "ni" => "∋", "prod" => "∏", "sum" => "∑", "prop" => "∝", "ang" => "∠",
+      "and" => "∧", "or" => "∨", "cap" => "∩", "cup" => "∪", "int" => "∫", "there4" => "∴",
+      "sim" => "∼", "cong" => "≅", "asymp" => "≈", "equiv" => "≡", "sub" => "⊂", "sup" => "⊃",
+      "nsub" => "⊄", "sube" => "⊆", "supe" => "⊇", "oplus" => "⊕", "otimes" => "⊗", "perp" => "⊥",
+      "sdot" => "⋅", "lceil" => "⌈", "rceil" => "⌉", "lfloor" => "⌊", "rfloor" => "⌋",
+      "lang" => "〈", "rang" => "〉", "spades" => "♠", "clubs" => "♣", "hearts" => "♥", "diams" => "♦"
     }.freeze
 
     module_function

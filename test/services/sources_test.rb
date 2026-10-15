@@ -5,17 +5,6 @@ require "digest"
 require "tmpdir"
 require "zlib"
 
-# Ingest is owned by another module of the port and may not have landed yet.
-# This stand-in only exists so `Sources::Sec.load_company` can be exercised;
-# every test that reaches it stubs `ingest_many` anyway.
-unless defined?(Ingest)
-  module Ingest
-    def self.ingest_many(_docs)
-      { added: 0, skipped: 0 }
-    end
-  end
-end
-
 # Port of tests/test_sources.py plus the pieces the contract adds: the Http
 # fetcher's cache / throttle / backoff / 4xx rules, quote parsing, the
 # diluted-vs-basic share split, EX-99.1 selection and the loader's writes.
@@ -235,6 +224,25 @@ class SourcesTest < ActiveSupport::TestCase
     assert_in_delta 2500.0, rows_by_year(facts)[2025][:revenue]
   end
 
+  test "rounded figures follow Python's round on ties" do
+    # Filers report in thousands, so one value in a hundred lands on a tie at
+    # one decimal of millions. Python rounds the exact binary value half-to-even
+    # (1234.55 is stored just below the tie); Ruby's Float#round would say
+    # 1234.6, 2.68 and -350.0 and the loaded figures would drift from the
+    # reference by a tenth.
+    facts = facts_fixture
+    gaap(facts)[:RevenueFromContractWithCustomerExcludingAssessedTax][:units][:USD] << fact(
+      1_234_550_000, "2025-01-01", "2025-12-31", form: "10-K/A", filed: "2026-05-01"
+    )
+    gaap(facts)[:EarningsPerShareDiluted] = { units: { "USD/shares": [fact(2.675, "2025-01-01", "2025-12-31")] } }
+    gaap(facts)[:AssetsCurrent][:units][:USD][1] = instant(1_800_050_000, "2025-12-31")
+    row = rows_by_year(facts)[2025]
+    assert_equal 1234.5, row[:revenue]
+    assert_equal 2.67, row[:eps]
+    assert_equal(-349.9, row[:nwc_change])
+    assert_equal 360.0, row[:ebitda] # no tie: unchanged
+  end
+
   # ---------------------------------------------------------- balance sheet
 
   test "net debt bridges debt and cash" do
@@ -283,6 +291,18 @@ class SourcesTest < ActiveSupport::TestCase
     assert_nil shares[:basic]
     gaap(facts).delete(:WeightedAverageNumberOfDilutedSharesOutstanding)
     assert_equal({ diluted: nil, basic: nil }, Sources::Sec.shares(facts))
+  end
+
+  test "net debt and share counts round like Python" do
+    facts = facts_fixture
+    gaap(facts)[:CashAndCashEquivalentsAtCarryingValue] = { units: { USD: [instant(1_000_050_000, "2025-12-31")] } }
+    assert_equal 249.9, Sources::Sec.net_debt(facts, 2025) # 1250 - 1000.05; Float#round says 250.0
+    assert_equal 250.0, Sources::Sec.net_debt(facts_fixture, 2025)
+    assert_equal 43.78, Sources::Sec.py_round(43_785_000 / 1e6, 2) # Float#round says 43.79
+    assert_equal 1234.5, Sources::Sec.py_round(1234.55, 1)
+    assert_equal 0.12, Sources::Sec.py_round(0.125, 2) # an exact tie goes to even
+    assert_equal 0.2, Sources::Sec.py_round(0.2, 4)
+    assert Sources::Sec.py_round(Float::NAN, 1).nan?
   end
 
   # ---------------------------------------------------- document selection
@@ -486,6 +506,22 @@ class SourcesTest < ActiveSupport::TestCase
     assert_in_delta 43.79, company.market_datum.shares_basic
   end
 
+  test "load company stores share counts rounded like Python" do
+    facts = facts_fixture
+    facts[:facts][:dei][:EntityCommonStockSharesOutstanding][:units][:shares] << instant(
+      43_785_000, "2026-09-30", filed: "2026-11-01", form: "10-Q", fp: "Q3"
+    )
+    stubbing(Sources::Sec, resolve_cik: ->(_t) { "0000780571" }, fetch_submissions: ->(_c) { submissions_fixture },
+                           fetch_facts: ->(_c) { facts }) do
+      stubbing(Sources::Market, fetch_quote: ->(_t, **) { quote_fixture }) do
+        Sources::Sec.load_company("ITRI", with_documents: false)
+      end
+    end
+    market = Company.find_ticker("ITRI").market_datum
+    assert_equal 43.78, market.shares_basic # Float#round would store 43.79
+    assert_equal 43.78, market.shares_diluted
+  end
+
   test "load company skips market data without a quote or share count" do
     stubbing(Sources::Sec, resolve_cik: ->(_t) { "0000780571" }, fetch_submissions: ->(_c) { submissions_fixture },
                            fetch_facts: ->(_c) { facts_fixture }) do
@@ -644,6 +680,13 @@ class SourcesTest < ActiveSupport::TestCase
       "<p>R&amp;D&nbsp;spend&#160;rose&#8217;&rsquo; &ldquo;a&rdquo; &mdash; &amp;nbsp; &lt;b&gt; &unknown;</p>"
     )
     assert_equal "R&D spend rose’’ “a” — &nbsp; <b> &unknown;", text
+  end
+
+  test "greek letters and mathematical operators are unescaped as html.unescape does" do
+    text = Sources::HtmlText.html_to_text(
+      "<p>&beta; of 1.2; &Delta;EBITDA &ge; &sum; of segments &rArr; margin &asymp; 34%; &sect;&nbsp;4.2 &hearts;</p>"
+    )
+    assert_equal "β of 1.2; ΔEBITDA ≥ ∑ of segments ⇒ margin ≈ 34%; § 4.2 ♥", text
   end
 
   test "windows-1252 numeric references and invalid code points follow html.unescape" do
@@ -904,6 +947,15 @@ class SourcesTest < ActiveSupport::TestCase
       assert_nil quote[:week52_low]
       assert_nil quote[:week52_high]
       assert_nil quote[:as_of]
+    end
+  end
+
+  test "quote figures round like Python" do
+    stubbing(Sources::Http, fetch_json: ->(*) { chart_payload({ regularMarketPrice: 123.455, fiftyTwoWeekLow: 80.125 }) }) do
+      quote = Sources::Market.fetch_quote("ITRI")
+      assert_equal 123.45, quote[:share_price] # Float#round says 123.46
+      assert_equal 80.12, quote[:week52_low]   # an exact tie goes to even
+      assert_equal 130.99, quote[:week52_high]
     end
   end
 
