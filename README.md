@@ -29,25 +29,35 @@ the export menu.
 > render the new slide blocks (the HTML export does), and search totals keep a
 > ranking artefact the Rails port corrects. Read `docs/AUDIT.md` first.
 
-## Quick start
+## Quick start (Ruby on Rails)
 
 ```bash
 git clone <this repo> && cd tee2
-./run.sh                      # seeds the demo corpus on first run, then serves
+bin/setup                     # bundle, migrate, seed the demo corpus
+bin/rails server              # http://127.0.0.1:3000
 ```
 
-Open <http://127.0.0.1:8787>. Or step by step:
+Or step by step:
 
 ```bash
-python3 -m argos seed         # 116 synthetic documents, 7 companies, 6 precedent deals
-python3 -m argos serve        # the web application
+bin/rails db:prepare          # schema, FTS index, 116 synthetic documents, 7 companies, 6 deals
+bin/rails server
+bin/rails "argos:load_sec['ITRI BMI XYL TRMB VNT ZBRA WTS','Smart Infrastructure & Measurement']"   # real data from EDGAR
+bin/rails "argos:pitchbook[ITRI,Project Meter,'BMI XYL TRMB VNT ZBRA WTS',pptx]"
+bin/rails test                # 693 tests
 ```
 
-Optional, for PowerPoint and PDF export:
+PowerPoint and PDF export need no extra install: the writers are Ruby (rubyzip,
+prawn). The rake tasks are listed in `docs/api.md`; the HTTP API is the same
+one the web pages use.
 
-```bash
-pip install -r requirements.txt
-```
+## The Python reference build
+
+The original stdlib-only Python implementation is still in `argos/` (run with
+`./run.sh` or `python3 -m argos serve`, port 8787, `pip install -r
+requirements.txt` for PowerPoint and PDF). It carries the same audited fixes as
+the Rails services and is kept as the reference until the Rails build has been
+through its own adversarial review, after which it is removed.
 
 Requires Python 3.11 or newer. Nothing else is needed for search, valuation,
 the web UI or HTML export.

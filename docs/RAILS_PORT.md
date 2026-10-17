@@ -308,15 +308,20 @@ serve palette tokens at `/tokens.css` from `Charts.css_tokens`.
 JSON API at `/api/...` with the **same paths and response keys** as `docs/api.md`
 (`Api::*` controllers), so the existing API documentation stays true.
 
-## Phase plan and file ownership
+## Phase plan and file ownership — status
 
-Phase A (parallel, disjoint files): Nlp · Ingest+HtmlText · Search+Analytics ·
-Valuation · Charts · Sources (Http/Market/Sec) · Seed::Demo · Exporters::Pptx ·
-Exporters::Pdf. Each owns its service file(s) and its test file(s) only.
-Phase B (parallel): Pitchbooks + deck partials + Exporters::Html · controllers,
-routes, views, layout, CSS/JS for research/dashboard/companies/monitor ·
-rake tasks + API controllers. Phase C: integration, full suite, run the server,
-screenshots, adversarial review, delete the Python tree, update README/TUTORIAL.
+Phase A (services) and Phase B (Pitchbooks + deck partials + Exporters::Html,
+the web UI, the JSON API and rake tasks) are ported and green: 693 tests,
+5,275 assertions across the whole suite on 17 October 2026. Phase C
+(integration, server run, screenshots) is done; the adversarial review of the
+port and the retirement of the Python tree follow.
+
+Integration notes: the formatting helpers live in
+`DashboardController::Formatting` (every view controller includes it);
+`Api::BaseController::Error(message, status)` is the API error class and a
+JSON catch-all route closes the `api` namespace; `Exporters::Pptx::Wording`
+holds the sentences the PPTX and PDF writers share; the valuation test seed
+replaces the demo rows it collides with so test classes can run in any order.
 
 ## Defects found by independent verification — the port must fix these
 
