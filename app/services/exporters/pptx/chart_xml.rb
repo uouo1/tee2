@@ -32,7 +32,11 @@ module Exporters
 
       attr_reader :kind, :categories, :series
 
-      # series: [{name:, values:, number_format:, fill: "RRGGBB" | :none}, ...]
+      # series: [{name:, values:, number_format:, fill: "RRGGBB" | :none,
+      #           point_fills: {index => "RRGGBB"}}, ...]
+      # point_fills recolours single points (c:dPt): the football field draws a
+      # reference-only or excluded range in the muted colour inside the same
+      # span series, so the stacked-bar construction stays two series.
       def initialize(kind:, categories:, series:, axis_color:, label_color:, grid_color:, gap_width: nil, overlap: nil)
         raise ArgumentError, "unknown chart kind #{kind.inspect}" unless AXIS_IDS.key?(kind)
 
@@ -109,7 +113,19 @@ module Exporters
         end.join
         val = %(<c:val><c:numRef><c:f>Sheet1!$#{column}$2:$#{column}$#{last_row}</c:f><c:numCache><c:formatCode>#{esc(item[:number_format])}</c:formatCode><c:ptCount val="#{count}"/>#{val_points}</c:numCache></c:numRef></c:val>)
         smooth = kind == :line ? %(<c:smooth val="0"/>) : ""
-        %(<c:ser><c:idx val="#{index}"/><c:order val="#{index}"/>#{name}#{series_format_xml(item[:fill])}#{cat}#{val}#{smooth}</c:ser>)
+        %(<c:ser><c:idx val="#{index}"/><c:order val="#{index}"/>#{name}#{series_format_xml(item[:fill])}#{points_xml(item[:point_fills])}#{cat}#{val}#{smooth}</c:ser>)
+      end
+
+      # c:dPt overrides, in the schema position after c:spPr and before c:cat.
+      # The children follow CT_DPt's order (idx, invertIfNegative, bubble3D,
+      # spPr), as python-pptx writes them for `series.points[i].format`.
+      def points_xml(point_fills)
+        return "" if point_fills.blank?
+
+        point_fills.sort_by { |idx, _| idx }.map do |idx, fill|
+          %(<c:dPt><c:idx val="#{idx}"/><c:invertIfNegative val="0"/><c:bubble3D val="0"/>) +
+            %(<c:spPr><a:solidFill><a:srgbClr val="#{fill}"/></a:solidFill></c:spPr></c:dPt>)
+        end.join
       end
 
       def series_format_xml(fill)

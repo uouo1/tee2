@@ -63,7 +63,10 @@ module Exporters
       # of Xml.paragraph keywords plus an optional :fill (cell background).
       # Columns share the width equally and rows the height, with the integer
       # remainder going to the last column/row — python-pptx's `new_tbl`.
-      def table(left, top, width, height, cells)
+      # `col_widths` (EMU per column) overrides the equal split, the way the
+      # Python sets `table.columns[i].width`; the last column absorbs any
+      # difference from `width` so the frame and the grid agree.
+      def table(left, top, width, height, cells, col_widths: nil)
         id = next_id
         rows = cells.map(&:dup)
         columns = rows.map(&:size).max || 0
@@ -72,10 +75,14 @@ module Exporters
         rows.each { |row| row.fill({ text: "" }, row.size...columns) }
         col_width = columns.positive? ? width / columns : width
         row_height = rows.empty? ? height : height / rows.size
-        grid = Array.new(columns) do |index|
-          w = index == columns - 1 ? col_width + (width - col_width * columns) : col_width
-          %(<a:gridCol w="#{w}"/>)
-        end.join
+        widths =
+          if col_widths && col_widths.size == columns
+            fixed = col_widths.first(columns - 1).map(&:to_i)
+            fixed + [width - fixed.sum]
+          else
+            Array.new(columns) { |index| index == columns - 1 ? col_width + (width - col_width * columns) : col_width }
+          end
+        grid = widths.map { |w| %(<a:gridCol w="#{w}"/>) }.join
         body = rows.each_with_index.map do |row, row_index|
           h = row_index == rows.size - 1 ? row_height + (height - row_height * rows.size) : row_height
           %(<a:tr h="#{h}">#{row.map { |cell| cell_xml(cell) }.join}</a:tr>)

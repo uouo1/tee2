@@ -34,6 +34,7 @@ module Exporters
     GRID = rgb(LIGHT[:grid])
     SEQ = LIGHT[:seq].map { |step| rgb(step) }.freeze
     WHITE = "FFFFFF"
+    W = Wording
 
     # Scheme colours for the theme part, so built-in styles stay on palette.
     THEME_COLORS = {
@@ -168,11 +169,13 @@ module Exporters
 
     # columns: [{key:, label:, numeric:, format:}]; the header is bold and
     # secondary, numeric columns right-aligned, and a row whose highlight_key
-    # is truthy (the target in a comps table) is set in bold.
+    # is truthy (the target in a comps table) is set in bold. `weights` gives
+    # relative column widths (a company name needs more room than a multiple);
+    # without it the columns split the width equally, as in the Python.
     def table(page, columns, rows, top: CONTENT_TOP, height: nil, width: CONTENT_W, left: MARGIN,
-              highlight_key: nil, font_size: 9.5)
+              highlight_key: nil, font_size: 9.5, row_height: inches(0.3), weights: nil)
       row_count = rows.size + 1
-      height ||= [CONTENT_H, inches(0.3) * row_count].min
+      height ||= [CONTENT_H, row_height * row_count].min
       header = columns.map do |column|
         { text: column[:label].to_s, size: font_size, bold: true, color: INK_SECONDARY,
           align: column[:numeric] ? "r" : nil }
@@ -185,7 +188,40 @@ module Exporters
           { text: text, size: font_size, bold: highlighted, color: INK, align: column[:numeric] ? "r" : nil }
         end
       end
-      page.table(left, top, width, height, [header, *body])
+      page.table(left, top, width, height, [header, *body], col_widths: column_widths(width, weights))
+      height # so the caller can place what follows
+    end
+
+    def column_widths(width, weights)
+      return nil if weights.blank?
+
+      total = weights.sum.to_f
+      weights.map { |weight| (width * weight / total).to_i }
+    end
+
+    # A label/value table without a header (the DCF bridge, the WACC build).
+    def pairs_table(page, rows, left:, top:, width:, row_height:, size: 11, header: nil)
+      cells = rows.map do |label, value|
+        [{ text: label.to_s, size: size, bold: false, color: INK_SECONDARY },
+         { text: value.to_s, size: size, bold: true, color: INK, align: "r" }]
+      end
+      if header
+        cells.unshift([{ text: header, size: size, bold: true, color: INK_SECONDARY },
+                       { text: "", size: size }])
+      end
+      return 0 if cells.empty?
+
+      page.table(left, top, width, row_height * cells.size, cells)
+      row_height * cells.size
+    end
+
+    # Small muted lines (footnotes, sources) in one text box.
+    def footnotes(page, lines, top:, left: MARGIN, width: CONTENT_W, size: 9)
+      lines = Array(lines).map(&:to_s).reject(&:blank?)
+      return if lines.empty?
+
+      page.text_box(left, top, width, inches(0.3) * lines.size,
+                    lines.map { |line| { text: line, size: size, color: MUTED, space_after: 2 } }, wrap: true)
     end
 
     # An unformatted cell is `str(row.get(key, "") or "")` in the Python, so
@@ -208,7 +244,9 @@ module Exporters
                          height: inches(3.1), series_name: "Value", number_format: "#,##0")
       chart = ChartXml.new(
         kind: :column, categories: categories, gap_width: 60, **chart_options,
-        series: [{ name: series_name, values: values.map { |v| (v || 0).to_f }, number_format: number_format, fill: SERIES_1 }]
+        # A missing value is a gap in the chart, not a zero-height bar (a nil
+        # never renders as 0).
+        series: [{ name: series_name, values: values.map { |v| v.nil? ? nil : v.to_f }, number_format: number_format, fill: SERIES_1 }]
       )
       page.chart(left, top, width, height, chart)
     end
@@ -225,20 +263,42 @@ module Exporters
     # Floating bars via a transparent base series plus a visible span series.
     # Categories are reversed because a horizontal bar chart draws the first
     # category at the bottom, and the deck lists methods top-down.
-    def add_football_field(page, ranges, reference_price:, currency:, top: CONTENT_TOP, height: inches(3.5))
-      ordered = ranges.reverse
+    #
+    # A range that does not set the conclusion (the 52-week range, shown for
+    # reference only, or a revenue multiple excluded on a margin outlier) keeps
+    # its place in the span series but is recoloured muted with a data-point
+    # override, so the chart stays the two-series construction a banker edits.
+    # A range without both ends cannot float and is left off the chart.
+    # `extra` lines (the conclusion, bases, notes) follow the detail line.
+    def add_football_field(page, ranges, reference_price:, currency:, top: CONTENT_TOP, height: inches(3.5),
+                           price_date: nil, extra: [])
+      drawable = W.drawable_ranges(ranges)
+      ordered = drawable.reverse
+      muted = ordered.each_index.select { |index| W.muted_range?(ordered[index]) }.to_h { |index| [index, MUTED] }
       chart = ChartXml.new(
         kind: :bar_stacked, categories: ordered.map { |r| r[:method].to_s }, overlap: 100, **chart_options,
         series: [
           { name: "Base", values: ordered.map { |r| r[:low].to_f }, number_format: "#,##0.00", fill: :none },
-          { name: "Range", values: ordered.map { |r| r[:high].to_f - r[:low].to_f }, number_format: "#,##0.00", fill: SERIES_1 }
+          { name: "Range", values: ordered.map { |r| r[:high].to_f - r[:low].to_f }, number_format: "#,##0.00", fill: SERIES_1,
+            point_fills: muted }
         ]
       )
       page.chart(MARGIN, top, CONTENT_W, height, chart)
       symbol = symbol_for(currency)
-      detail = ranges.map { |r| "#{r[:method]}: #{symbol}#{number(r[:low], 2)}–#{symbol}#{number(r[:high], 2)}" }.join("; ")
-      reference = truthy_number?(reference_price) ? "Current share price: #{symbol}#{number(reference_price, 2)}. " : ""
-      note(page, "#{reference}#{detail}", top: top + height)
+      detail = ranges.map do |r|
+        span = W.number?(r[:low]) && W.number?(r[:high]) ? "#{symbol}#{number(r[:low], 2)}–#{symbol}#{number(r[:high], 2)}" : "n/a"
+        status = W.range_status(r)
+        "#{r[:method]}: #{span}#{status ? " (#{status})" : ''}"
+      end.join("; ")
+      reference = ""
+      if truthy_number?(reference_price)
+        reference = "Current share price: #{symbol}#{number(reference_price, 2)}#{price_date.present? ? " as of #{W.date(price_date)}" : ''}. "
+      end
+      paragraphs = [{ text: "#{reference}#{detail}", size: 11, color: INK_SECONDARY }]
+      Array(extra).each do |line|
+        paragraphs << (line.is_a?(Hash) ? line : { text: line.to_s, size: 11, color: INK_SECONDARY })
+      end
+      page.text_box(MARGIN, top + height, CONTENT_W, inches(0.8), paragraphs, wrap: true)
     end
 
     # The sensitivity grid as a table whose cells are shaded on the sequential
@@ -289,6 +349,10 @@ module Exporters
       ].select(&:present?).map(&:to_s).join(" · ")
       paragraphs << { text: meta, size: 12, color: MUTED }
       page.text_box(MARGIN, inches(2.2), CONTENT_W, inches(3.0), paragraphs, wrap: true)
+      # Item 22: the stamp as a footer line, so a deck mailed around for a week
+      # still says which data and which code produced it.
+      stamp = W.stamp_line(payload[:stamp])
+      page.text_box(MARGIN, inches(6.75), CONTENT_W, inches(0.4), [{ text: stamp, size: 10, color: MUTED }], wrap: true) if stamp
     end
 
     # Disclaimer, process and any unknown kind: bullets when present, else body.
@@ -308,11 +372,11 @@ module Exporters
       payload = payload_of(slide)
       heading(page, slide.title.to_s, slide.subtitle)
       reference = payload[:reference_range].presence || {}
-      symbol = symbol_for(payload[:currency])
       if reference.present?
-        text = "Reference range #{symbol}#{number(reference[:low] || 0, 2)} – #{symbol}#{number(reference[:high] || 0, 2)} " \
-               "per share  ·  current #{symbol}#{number(payload[:share_price] || 0, 2)}"
-        page.text_box(MARGIN, inches(1.4), CONTENT_W, inches(0.5), [{ text: text, size: 13, bold: true, color: SERIES_1 }], wrap: false)
+        # Item 16: implied value, not "upside" or a "reference range"; a range
+        # that could not be bridged says so instead of printing $0.00.
+        page.text_box(MARGIN, inches(1.4), CONTENT_W, inches(0.5),
+                      [{ text: W.implied_value_line(payload), size: 13, bold: true, color: SERIES_1 }], wrap: false)
       end
       bullets(page, payload[:bullets] || [], top: inches(2.0), height: inches(4.9))
     end
@@ -326,10 +390,12 @@ module Exporters
       if extracted.present?
         paragraphs << { text: "\nMetrics extracted from the corpus", size: 11, bold: true, color: INK_SECONDARY }
         extracted.each do |kpi|
-          paragraphs << { text: "•  #{kpi[:label]}: #{kpi[:value]} (#{kpi[:observations]} observations)", size: 11, color: INK }
+          latest = kpi[:period].present? ? ", latest #{W.date(kpi[:period])}" : ""
+          paragraphs << { text: "•  #{kpi[:label]}: #{kpi[:value]} (#{kpi[:observations]} observations#{latest})", size: 11, color: INK }
         end
       end
       page.text_box(MARGIN, CONTENT_TOP, inches(6.4), inches(4.4), paragraphs, wrap: true)
+      footnotes(page, [W.overview_footnote(payload)], top: inches(6.55))
       rows = (payload[:kpis] || []).map { |kpi| [kpi[:label].to_s, kpi[:value].to_s] }
       return if rows.empty? # a zero-row table is not valid DrawingML
 
@@ -347,8 +413,10 @@ module Exporters
       page.text_box(MARGIN, inches(1.4), CONTENT_W, inches(0.9), [{ text: payload[:narrative].to_s, size: 12, color: INK }], wrap: true)
       timeline = payload[:sentiment_timeline] || []
       if timeline.present?
+        # A month without a scored document is a gap in the line, not a
+        # neutral 0 (the Python's `or 0`): nil never renders as zero.
         add_line_chart(
-          page, timeline.map { |row| row[:month] }, timeline.map { |row| (row[:sentiment] || 0).to_f },
+          page, timeline.map { |row| row[:month] }, timeline.map { |row| row[:sentiment].nil? ? nil : row[:sentiment].to_f },
           left: MARGIN, top: inches(2.35), width: inches(6.0), height: inches(2.9),
           series_name: "Mean tone", number_format: "0.00"
         )
@@ -375,6 +443,10 @@ module Exporters
       page = package.add_slide
       heading(page, slide.title.to_s, slide.subtitle)
       categories = rows.map { |r| "FY#{r[:fiscal_year]}" }
+      # The LTM row travels apart from the fiscal years (it would print twice on
+      # the axis) and joins the table only, labelled with its basis.
+      ltm = payload[:ltm].presence
+      table_rows = ltm ? rows + [ltm.merge(fiscal_year: ltm[:basis].presence || "LTM")] : rows
       add_column_chart(
         page, categories, rows.map { |r| r[:revenue] },
         left: MARGIN, top: CONTENT_TOP, width: inches(6.0), height: inches(2.9),
@@ -398,7 +470,7 @@ module Exporters
           { key: :eps, label: "EPS", numeric: true, format: "{:,.2f}" },
           { key: :capex, label: "Capex", numeric: true, format: "{:,.0f}" }
         ],
-        rows, top: inches(4.6)
+        table_rows, top: inches(4.6), row_height: ltm ? inches(0.27) : inches(0.3)
       )
       note(page, payload[:note].to_s, top: inches(6.9))
     end
@@ -407,43 +479,78 @@ module Exporters
       payload = payload_of(slide)
       page = package.add_slide
       heading(page, slide.title.to_s, slide.subtitle)
+      ranges = payload[:ranges] || []
+      extra = []
+      # The conclusion and the methods that set it (item 16), the basis of each
+      # range (item 17) and why a range is excluded (item 14) follow the detail
+      # line. A payload without a concluded range (a deck built before the
+      # audit) keeps the Python note only.
+      if payload.key?(:concluded_range) || payload.key?(:methods)
+        extra << { text: W.conclusion_sentence(payload), size: 11, bold: true, color: INK }
+      end
+      bases = ranges.select { |r| r[:basis].present? }.map { |r| "#{r[:method]}: #{r[:basis]}" }
+      if bases.any? && W.flagged_ranges?(ranges)
+        label = payload[:basis_label].present? ? "Bases (multiples on #{payload[:basis_label]}) — " : "Bases — "
+        extra << { text: "#{label}#{bases.join('; ')}", size: 9, color: MUTED }
+      end
+      W.range_notes(ranges).each { |line| extra << { text: line, size: 9, color: MUTED } }
       add_football_field(
-        page, payload[:ranges] || [],
+        page, ranges,
         reference_price: payload[:reference_price],
         currency: payload[:currency] || "USD",
-        top: CONTENT_TOP, height: inches(3.9)
+        top: CONTENT_TOP, height: inches(3.9),
+        price_date: payload[:price_date], extra: extra
       )
     end
 
     def slide_trading_comps(package, slide)
       payload = payload_of(slide)
       currency = payload[:currency] || "USD"
-      target = payload[:target].presence
-      rows = (target ? [target] : []) + (payload[:rows] || [])
+      rows = W.comps_rows(payload)
       page = package.add_slide
       heading(page, slide.title.to_s, slide.subtitle)
-      table(
-        page,
-        [
-          { key: :ticker, label: "Ticker" },
-          { key: :name, label: "Company" },
-          { key: :share_price, label: "Price", numeric: true, format: "{:,.2f}" },
-          { key: :market_cap, label: "Mkt cap (#{currency}m)", numeric: true, format: "{:,.0f}" },
-          { key: :enterprise_value, label: "EV (#{currency}m)", numeric: true, format: "{:,.0f}" },
-          { key: :revenue, label: "Revenue", numeric: true, format: "{:,.0f}" },
-          { key: :ebitda_margin, label: "EBITDA margin", numeric: true, format: "{:.1%}" },
-          { key: :ev_revenue, label: "EV/Rev", numeric: true, format: "{:,.1f}x" },
-          { key: :ev_ebitda, label: "EV/EBITDA", numeric: true, format: "{:,.1f}x" },
-          { key: :pe, label: "P/E", numeric: true, format: "{:,.1f}x" }
-        ],
-        rows, top: CONTENT_TOP, highlight_key: :is_target
+      columns = [
+        { key: :ticker, label: "Ticker" },
+        { key: :name, label: "Company" }
+      ]
+      # Item 17: every row names the period its multiples are on.
+      columns << { key: :basis, label: "Basis" } if W.comps_basis?(payload)
+      columns += [
+        { key: :share_price, label: "Price", numeric: true, format: "{:,.2f}" },
+        { key: :market_cap, label: "Mkt cap (#{currency}m)", numeric: true, format: "{:,.0f}" },
+        { key: :enterprise_value, label: "EV (#{currency}m)", numeric: true, format: "{:,.0f}" },
+        { key: :revenue, label: "Revenue", numeric: true, format: "{:,.0f}" },
+        { key: :ebitda_margin, label: "EBITDA margin", numeric: true, format: "{:.1%}" },
+        { key: :ev_revenue, label: "EV/Rev", numeric: true, format: "{:,.1f}x" },
+        { key: :ev_ebitda, label: "EV/EBITDA", numeric: true, format: "{:,.1f}x" }
+      ]
+      # Item 12: the NTM multiples sit beside the trailing ones they lead.
+      columns << { key: :ev_ebitda_ntm_text, label: "EV/NTM EBITDA", numeric: true, format: "{:,.1f}x" } if payload[:has_ntm]
+      columns << { key: :pe, label: "P/E", numeric: true, format: "{:,.1f}x" }
+      columns << { key: :pe_ntm, label: "NTM P/E", numeric: true, format: "{:,.1f}x" } if payload[:has_ntm]
+      columns << { key: :share_basis, label: "Shares" } if W.comps_share_basis?(payload)
+      rows = rows.map { |row| row.merge(ev_ebitda_ntm_text: W.ntm_cell(row, :ev_ebitda_ntm)) } if payload[:has_ntm]
+      extended = columns.size > 10
+      weights = columns.map { |c| { name: 2.2, basis: 1.2, share_basis: 1.3, market_cap: 1.2, enterprise_value: 1.1 }.fetch(c[:key], 1.0) }
+      comps_height = table(
+        page, columns, rows, top: CONTENT_TOP, highlight_key: :is_target,
+        font_size: extended ? 8.0 : 9.5, row_height: extended ? inches(0.27) : inches(0.3),
+        weights: extended ? weights : nil
       )
+
       stats = payload[:stats] || {}
-      stat_rows = [[:ev_revenue, "EV / Revenue"], [:ev_ebitda, "EV / EBITDA"], [:pe, "P / E"]].map do |metric, label|
+      labels = payload[:labels] || {}
+      metrics = [[:ev_revenue, "EV / Revenue"], [:ev_ebitda, "EV / EBITDA"], [:pe, "P / E"]]
+      metrics += [[:ev_ebitda_ntm, "EV / NTM EBITDA"], [:pe_ntm, "NTM P / E"]] if payload[:has_ntm]
+      stat_rows = metrics.map do |metric, label|
         distribution = stats[metric] || {}
-        { multiple: label, **distribution.slice(:min, :p25, :median, :p75, :max) }
+        { multiple: labels[metric].presence || label, **distribution.slice(:min, :p25, :median, :p75, :max) }
       end
-      table(
+      notes = W.comps_footnotes(payload)
+      # The Python placed the distribution at 5.35in; with the item-17
+      # footnotes to fit as well, it follows the comps table instead.
+      distribution_top = notes.empty? ? inches(5.35) : CONTENT_TOP + comps_height + inches(0.12)
+      distribution_height = table(
         page,
         [
           { key: :multiple, label: "Peer distribution" },
@@ -453,8 +560,9 @@ module Exporters
           { key: :p75, label: "75th", numeric: true, format: "{:,.1f}x" },
           { key: :max, label: "Max", numeric: true, format: "{:,.1f}x" }
         ],
-        stat_rows, top: inches(5.35)
+        stat_rows, top: distribution_top, font_size: extended ? 8.5 : 9.5, row_height: extended ? inches(0.25) : inches(0.3)
       )
+      footnotes(page, notes, top: distribution_top + distribution_height + inches(0.08), size: 8.5)
     end
 
     def slide_precedents(package, slide)
@@ -484,41 +592,45 @@ module Exporters
       currency = payload[:currency] || "USD"
       page = package.add_slide
       heading(page, slide.title.to_s, slide.subtitle)
+      build_rows = W.wacc_rows(payload[:wacc_build])
+      bridge = W.dcf_bridge_rows(payload)
+      columns = W.dcf_columns(payload)
+      rows = W.dcf_table_rows(payload)
+      unless W.extended_dcf?(payload)
+        # The Python layout: chart and bridge side by side, projections below.
+        add_column_chart(
+          page, projections.map { |p| p[:year].to_s }, projections.map { |p| p[:fcf] },
+          left: MARGIN, top: CONTENT_TOP, width: inches(5.9), height: inches(2.8),
+          series_name: "Unlevered FCF (#{currency}m)"
+        )
+        pairs_table(page, bridge, left: inches(7.0), top: CONTENT_TOP, width: inches(5.7), row_height: inches(0.33))
+        table(page, columns, rows, top: inches(4.6))
+        note(page, payload[:note].to_s, top: inches(6.6))
+        return
+      end
+
+      # Item 18: chart, bridge with the cross-checks and the WACC build across
+      # the top; the projections with D&A, ΔNWC and the terminal year below;
+      # the stub, WACC and cross-check notes underneath.
+      with_build = build_rows.any?
+      chart_w = with_build ? inches(3.9) : inches(5.9)
       add_column_chart(
         page, projections.map { |p| p[:year].to_s }, projections.map { |p| p[:fcf] },
-        left: MARGIN, top: CONTENT_TOP, width: inches(5.9), height: inches(2.8),
+        left: MARGIN, top: CONTENT_TOP, width: chart_w, height: inches(2.45),
         series_name: "Unlevered FCF (#{currency}m)"
       )
-      symbol = symbol_for(currency)
-      bridge = [
-        ["PV of forecast FCF", "#{symbol}#{number(payload[:pv_explicit] || 0, 0)}m"],
-        ["PV of terminal value", "#{symbol}#{number(payload[:pv_terminal] || 0, 0)}m"],
-        ["Enterprise value", "#{symbol}#{number(payload[:enterprise_value] || 0, 0)}m"],
-        ["Equity value", "#{symbol}#{number(payload[:equity_value] || 0, 0)}m"],
-        ["Value per share", "#{symbol}#{number(payload[:value_per_share] || 0, 2)}"],
-        ["Current share price", "#{symbol}#{number(payload[:share_price] || 0, 2)}"]
-      ]
-      cells = bridge.map do |label, value|
-        [{ text: label, size: 11, bold: false, color: INK_SECONDARY },
-         { text: value, size: 11, bold: true, color: INK, align: "r" }]
+      bridge_left = with_build ? inches(4.75) : inches(7.0)
+      bridge_w = with_build ? inches(3.95) : inches(5.7)
+      heights = [pairs_table(page, bridge, left: bridge_left, top: CONTENT_TOP, width: bridge_w, row_height: inches(0.26), size: 10)]
+      if with_build
+        heights << pairs_table(page, build_rows, left: inches(8.9), top: CONTENT_TOP, width: SLIDE_W - MARGIN - inches(8.9),
+                                                 row_height: inches(0.245), size: 9.5, header: "WACC build")
       end
-      page.table(inches(7.0), CONTENT_TOP, inches(5.7), inches(0.33) * bridge.size, cells)
-      table(
-        page,
-        [
-          { key: :year, label: "Year", format: "{:.0f}" },
-          { key: :revenue, label: "Revenue", numeric: true, format: "{:,.0f}" },
-          { key: :growth, label: "Growth", numeric: true, format: "{:.1%}" },
-          { key: :ebitda, label: "EBITDA", numeric: true, format: "{:,.0f}" },
-          { key: :ebit, label: "EBIT", numeric: true, format: "{:,.0f}" },
-          { key: :taxes, label: "Taxes", numeric: true, format: "{:,.0f}" },
-          { key: :capex, label: "Capex", numeric: true, format: "{:,.0f}" },
-          { key: :fcf, label: "UFCF", numeric: true, format: "{:,.0f}" },
-          { key: :pv_fcf, label: "PV", numeric: true, format: "{:,.0f}" }
-        ],
-        projections, top: inches(4.6)
-      )
-      note(page, payload[:note].to_s, top: inches(6.6))
+      table_top = CONTENT_TOP + [inches(2.45), *heights].max + inches(0.15)
+      weights = columns.map { |c| c[:key] == :year ? 1.6 : 1.0 }
+      table_height = table(page, columns, rows, top: table_top, font_size: 8.5, row_height: inches(0.25),
+                                                highlight_key: :is_terminal, weights: weights)
+      footnotes(page, W.dcf_notes(payload), top: table_top + table_height + inches(0.08), size: 8.5)
     end
 
     def slide_sensitivity(package, slide)
@@ -526,29 +638,27 @@ module Exporters
       heading(page, slide.title.to_s, slide.subtitle)
       payload = payload_of(slide)
       add_heatmap_table(page, payload)
-      note(
-        page,
-        "Value per share (#{payload[:currency] || 'USD'}); current share price " \
-        "#{symbol_for(payload[:currency])}#{number(payload[:reference_price] || 0, 2)}.",
-        top: inches(5.0)
-      )
+      # A missing price says "not loaded" (Python HEAD), never $0.00.
+      note(page, W.sensitivity_note(payload), top: inches(5.0))
     end
 
     def slide_buyers(package, slide)
       payload = payload_of(slide)
       page = package.add_slide
       heading(page, slide.title.to_s, slide.subtitle)
+      currency = payload[:currency].presence || "USD"
       table(
         page,
         [
           { key: :name, label: "Counterparty" },
           { key: :type, label: "Type" },
-          { key: :enterprise_value, label: "EV (USDm)", numeric: true, format: "{:,.0f}" },
+          { key: :enterprise_value, label: "EV (#{currency}m)", numeric: true, format: "{:,.0f}" },
           { key: :relative_size, label: "EV vs target", numeric: true, format: "{:,.2f}x" },
           { key: :rationale, label: "Rationale" }
         ],
         payload[:candidates] || [], top: CONTENT_TOP, font_size: 9.0
       )
+      footnotes(page, ["Enterprise values and multiples on #{payload[:basis_label]}."], top: inches(6.75)) if payload[:basis_label].present?
     end
 
     def slide_evidence(package, slide)

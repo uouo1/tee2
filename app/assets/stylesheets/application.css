@@ -321,3 +321,16 @@ tr.is-estimate td { color: var(--text-secondary); font-style: italic; }
 tr.is-ltm td { background: color-mix(in srgb, var(--series-1) 6%, transparent); }
 .actions-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .error-page { padding: 40px 0; }
+
+/* ---- Deck preview and pitch-book pages (payload keys added by the audit port) ---- */
+.deck-preview .stamp, .stamp { font-size: 11.5px; color: var(--text-secondary); font-variant-numeric: tabular-nums; margin-top: 18px; }
+.deck-preview .footnote, .footnote { font-size: 11.5px; color: var(--text-secondary); margin: 8px 0 0; }
+.table-scroll { overflow-x: auto; }
+tr.is-excluded td, tr.is-reference td { color: var(--text-secondary); }
+tr.is-terminal td { border-top: 1px solid var(--axis); font-weight: 600; }
+table.wacc-build td:first-child { color: var(--text-secondary); }
+table.dcf-projections { font-variant-numeric: tabular-nums; }
+.note.pills { display: flex; flex-wrap: wrap; gap: 6px 10px; }
+.stale-warning { background: color-mix(in srgb, var(--warning, #c47a00) 10%, transparent); }
+label.chip { cursor: pointer; }
+label.chip input[type="checkbox"] { position: absolute; opacity: 0; width: 0; height: 0; }

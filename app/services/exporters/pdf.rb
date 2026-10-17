@@ -45,6 +45,9 @@ module Exporters
     SEQ = LIGHT[:seq].map { |step| rgb(step) }.freeze
     HIGHLIGHT = "EAF1FC"   # the target row in the comps table
     WHITE = "FFFFFF"
+    # Shared with the PPTX writer so both files print the same sentences for
+    # the audit's payload keys (stamp, implied value, comps footnotes, DCF build).
+    W = Exporters::Pptx::Wording
 
     MM = 72.0 / 25.4
     # Prawn's "A4" is portrait [595.28, 841.89]; landscape swaps the pair.
@@ -65,6 +68,7 @@ module Exporters
       body: { size: 10, line: 14, color: INK },
       bullet: { size: 10, line: 14, color: INK, indent: 10, space_after: 5 },
       cite: { size: 7.5, line: 10, color: MUTED, indent: 10, space_after: 7 },
+      footnote: { size: 7, line: 9, color: MUTED, space_after: 2 },
       note: { size: 8.5, line: 12, color: INK_SECONDARY, space_before: 6 },
       cell: { size: 7.5, line: 9.5, color: INK }
     }.freeze
@@ -240,7 +244,7 @@ module Exporters
     # columns: [{key:, label:, numeric:, format:}]. Header bold with a rule
     # under it, hairlines between body rows, numeric columns right-aligned, and
     # a row whose highlight_key is truthy (the target in a comps table) tinted.
-    def table(pdf, columns, rows, highlight_key: nil, col_widths: nil)
+    def table(pdf, columns, rows, highlight_key: nil, col_widths: nil, weights: nil)
       style = STYLES[:cell]
       header = columns.map { |column| "<b>#{esc(column[:label])}</b>" }
       highlight_rows = []
@@ -250,6 +254,10 @@ module Exporters
           value = row[column[:key]]
           esc(column[:format] ? fmt(value, column[:format]) : (value.nil? || value == false ? "" : value.to_s))
         end
+      end
+      if col_widths.nil? && weights
+        total = weights.sum.to_f
+        col_widths = weights.map { |weight| pdf.bounds.width * weight / total }
       end
       widths = col_widths || Array.new(columns.size, pdf.bounds.width / columns.size)
       pdf.table([header, *body], column_widths: widths, header: true,
@@ -303,8 +311,12 @@ module Exporters
       pdf.stroke_color INK
     end
 
-    def football_field(pdf, ranges, reference_price, currency, width: pdf.bounds.width, row_height: 20)
-      ranges = Array(ranges)
+    # A range that does not set the conclusion (reference only, or excluded on a
+    # margin outlier) is drawn in the muted colour; the concluded range is a
+    # faint band behind the bars, as in the HTML chart. A range without both
+    # ends cannot be drawn and appears in the table only.
+    def football_field(pdf, ranges, reference_price, currency, width: pdf.bounds.width, row_height: 20, concluded: nil)
+      ranges = W.drawable_ranges(ranges)
       height = row_height * ranges.size + 34
       label_width = 150
       plot_left = label_width
@@ -327,11 +339,17 @@ module Exporters
           hairline(pdf, x, 22, x, height - 6, color: GRID, width: 0.4)
           label(pdf, "#{symbol}#{number(value, 0)}", x, 10, size: 6.5, color: MUTED, anchor: :middle)
         end
+        concluded ||= {}
+        if ranges.any? && W.number?(concluded[:low]) && W.number?(concluded[:high])
+          x1 = x_of.call(concluded[:low].to_f)
+          x2 = x_of.call(concluded[:high].to_f)
+          bar(pdf, x1, 22, [1.0, x2 - x1].max, row_height * ranges.size + 4, opacity: 0.07)
+        end
         ranges.reverse.each_with_index do |row, index|
           y = 26 + index * row_height
           x1 = x_of.call(row[:low].to_f)
           x2 = x_of.call(row[:high].to_f)
-          bar(pdf, x1, y, [1.5, x2 - x1 - 1.5].max, row_height - 8)
+          bar(pdf, x1, y, [1.5, x2 - x1 - 1.5].max, row_height - 8, color: W.muted_range?(row) ? MUTED : SERIES_1)
           label(pdf, row[:method].to_s[0, 44], label_width - 6, y + 3, size: 7.5, color: INK, anchor: :end)
           label(pdf, "#{symbol}#{number(row[:low], 0)}", x1 - 4, y + 3, size: 6.5, color: INK_SECONDARY, anchor: :end)
           label(pdf, "#{symbol}#{number(row[:high], 0)}", x2 + 3, y + 3, size: 6.5, color: INK_SECONDARY)
@@ -358,14 +376,19 @@ module Exporters
         label(pdf, title, 0, height - 8, size: 8, color: INK_SECONDARY) if title.present?
         hairline(pdf, 0, plot_bottom, width, plot_bottom, color: AXIS, width: 0.5)
         values.each_with_index do |value, index|
-          bar_h = [0.8, (value || 0).to_f / top_value * plot_height].max
           x = 5 + index * slot + (slot - bar_w) / 2
-          bar(pdf, x, plot_bottom, bar_w, bar_h)
           label(pdf, labels[index].to_s, x + bar_w / 2, plot_bottom - 9, size: 6.5, color: MUTED, anchor: :middle)
+          # A missing value is a gap labelled n/a, not a zero bar.
+          if value.nil?
+            label(pdf, "n/a", x + bar_w / 2, plot_bottom + 3, size: 6.5, color: MUTED, anchor: :middle)
+            next
+          end
+          bar_h = [0.8, value.to_f / top_value * plot_height].max
+          bar(pdf, x, plot_bottom, bar_w, bar_h)
           # Selective direct labels: first and last bar only.
           next unless index.zero? || index == values.size - 1
 
-          label(pdf, fmt((value || 0).to_f, value_format), x + bar_w / 2, plot_bottom + bar_h + 3,
+          label(pdf, fmt(value.to_f, value_format), x + bar_w / 2, plot_bottom + bar_h + 3,
                 size: 6.5, color: INK_SECONDARY, anchor: :middle)
         end
       end
@@ -432,6 +455,23 @@ module Exporters
       paragraph(pdf, esc(text), :note) if text.present?
     end
 
+    def footnotes(pdf, lines)
+      lines = Array(lines).map(&:to_s).reject(&:blank?)
+      return if lines.empty?
+
+      spacer(pdf, 4)
+      lines.each { |line| paragraph(pdf, esc(line), :footnote) }
+    end
+
+    # Label/value rows as a two-column table (the DCF bridge, the WACC build).
+    def pairs(pdf, rows, header: nil)
+      return if rows.empty?
+
+      table(pdf, [{ key: :label, label: header || "" }, { key: :value, label: "", numeric: true }],
+            rows.map { |label_text, value| { label: label_text, value: value } },
+            col_widths: [pdf.bounds.width * 0.62, pdf.bounds.width * 0.38])
+    end
+
     def slide_flow(pdf, slide)
       kind = slide.kind.to_s
       payload = payload_of(slide)
@@ -447,6 +487,9 @@ module Exporters
           payload[:target], payload[:ticker], payload[:banker], payload[:date]
         ].select(&:present?).map(&:to_s).join(" · ")
         paragraph(pdf, esc(meta), :sub)
+        # Item 22: the stamp as a footer line at the foot of the cover.
+        stamp = W.stamp_line(payload[:stamp])
+        pdf.text_box(esc(stamp), at: [0, 14], width: pdf.bounds.width, size: 8, color: MUTED, inline_format: true) if stamp
         return
       end
 
@@ -458,10 +501,8 @@ module Exporters
       when "executive_summary", "process"
         reference = payload[:reference_range] || {}
         if reference.present?
-          symbol = symbol_for(currency)
-          paragraph(pdf, "<b>Reference range #{symbol}#{number(reference[:low] || 0, 2)} – " \
-                         "#{symbol}#{number(reference[:high] || 0, 2)} per share · current " \
-                         "#{symbol}#{number(payload[:share_price] || 0, 2)}</b>", :body)
+          # Item 16 wording; an unbridged range says so instead of $0.00.
+          paragraph(pdf, "<b>#{esc(W.implied_value_line(payload))}</b>", :body)
           spacer(pdf, 6)
         end
         bullets(pdf, payload[:bullets])
@@ -471,18 +512,22 @@ module Exporters
         table(pdf, [{ key: :label, label: "Metric" }, { key: :value, label: "Value", numeric: true }],
               Array(payload[:kpis]), col_widths: [pdf.bounds.width * 0.35, pdf.bounds.width * 0.25])
         if payload[:extracted_kpis].present?
-          extracted = payload[:extracted_kpis].map { |k| "#{k[:label]} #{k[:value]} (#{k[:observations]} obs.)" }
+          extracted = payload[:extracted_kpis].map do |k|
+            "#{k[:label]} #{k[:value]} (#{k[:observations]} obs.#{k[:period].present? ? ", latest #{W.date(k[:period])}" : ''})"
+          end
           note(pdf, "Metrics extracted from the corpus: #{extracted.join(', ')}")
         end
+        footnotes(pdf, [W.overview_footnote(payload)])
       when "market_overview"
         paragraph(pdf, esc(payload[:narrative]), :body)
         spacer(pdf, 8)
         timeline = Array(payload[:sentiment_timeline])
         if timeline.any?
           # Tone is rebased +1 so a bar chart (which needs a zero baseline) can
-          # show a [-1, 1] score.
+          # show a [-1, 1] score. An unscored month is labelled n/a rather than
+          # drawn as neutral (the Python's `or 0`).
           column_drawing(pdf, timeline.map { |row| row[:month].to_s[-5..] || row[:month].to_s },
-                         timeline.map { |row| (row[:sentiment] || 0).to_f + 1 },
+                         timeline.map { |row| row[:sentiment].nil? ? nil : row[:sentiment].to_f + 1 },
                          title: "Mean document tone by month (rebased +1)", width: pdf.bounds.width, height: 110,
                          value_format: "{:,.2f}")
         end
@@ -496,6 +541,9 @@ module Exporters
         rows = Array(payload[:rows])
         column_drawing(pdf, rows.map { |r| "FY#{r[:fiscal_year]}" }, rows.map { |r| r[:revenue] },
                        title: "Revenue (#{currency}m)", width: pdf.bounds.width, height: 120)
+        # The LTM row joins the table only (it would print twice on the axis).
+        ltm = payload[:ltm].presence
+        table_rows = ltm ? rows + [ltm.merge(fiscal_year: ltm[:basis].presence || "LTM")] : rows
         spacer(pdf, 6)
         # The reference formats the year column with "{:,.0f}", which prints
         # "2,020"; years are not amounts, so no grouping here (same on the DCF slide).
@@ -508,38 +556,65 @@ module Exporters
           { key: :net_income, label: "Net income", numeric: true, format: "{:,.0f}" },
           { key: :eps, label: "EPS", numeric: true, format: "{:,.2f}" },
           { key: :capex, label: "Capex", numeric: true, format: "{:,.0f}" }
-        ], rows)
+        ], table_rows)
         note(pdf, payload[:note])
       when "valuation_summary"
-        football_field(pdf, payload[:ranges], payload[:reference_price], currency)
+        ranges = Array(payload[:ranges])
+        football_field(pdf, ranges, payload[:reference_price], currency, concluded: payload[:concluded_range])
         spacer(pdf, 8)
         w = pdf.bounds.width
-        table(pdf, [
+        columns = [
           { key: :method, label: "Methodology" },
           { key: :low, label: "Low", numeric: true, format: "{:,.2f}" },
           { key: :high, label: "High", numeric: true, format: "{:,.2f}" },
           { key: :mid, label: "Midpoint", numeric: true, format: "{:,.2f}" },
           { key: :basis, label: "Basis" }
-        ], Array(payload[:ranges]), col_widths: [w * 0.26, w * 0.1, w * 0.1, w * 0.12, w * 0.42])
+        ]
+        widths = [w * 0.26, w * 0.1, w * 0.1, w * 0.12, w * 0.42]
+        if W.flagged_ranges?(ranges)
+          # Which ranges set the conclusion (items 14 and 16).
+          columns << { key: :status, label: "In conclusion" }
+          ranges = ranges.map { |r| r.merge(status: W.status_label(r)) }
+          widths = [w * 0.24, w * 0.08, w * 0.08, w * 0.09, w * 0.39, w * 0.12]
+        end
+        table(pdf, columns, ranges, col_widths: widths)
+        if payload.key?(:concluded_range) || payload.key?(:methods)
+          paragraph(pdf, "<b>#{esc(W.conclusion_sentence(payload))}</b>", :note)
+        end
+        notes = W.range_notes(ranges)
+        notes.unshift("Multiples on #{payload[:basis_label]}.") if payload[:basis_label].present?
+        footnotes(pdf, notes)
       when "trading_comps"
-        target = payload[:target].presence || {}
-        rows = (target.present? ? [target] : []) + Array(payload[:rows])
-        table(pdf, [
+        rows = W.comps_rows(payload)
+        columns = [
           { key: :ticker, label: "Ticker" },
-          { key: :name, label: "Company" },
+          { key: :name, label: "Company" }
+        ]
+        # Item 17: each row names its period; item 12: NTM beside trailing.
+        columns << { key: :basis, label: "Basis" } if W.comps_basis?(payload)
+        columns += [
           { key: :share_price, label: "Price", numeric: true, format: "{:,.2f}" },
           { key: :market_cap, label: "Mkt cap", numeric: true, format: "{:,.0f}" },
           { key: :enterprise_value, label: "EV", numeric: true, format: "{:,.0f}" },
           { key: :revenue, label: "Revenue", numeric: true, format: "{:,.0f}" },
           { key: :ebitda_margin, label: "Margin", numeric: true, format: "{:.1%}" },
           { key: :ev_revenue, label: "EV/Rev", numeric: true, format: "{:,.1f}x" },
-          { key: :ev_ebitda, label: "EV/EBITDA", numeric: true, format: "{:,.1f}x" },
-          { key: :pe, label: "P/E", numeric: true, format: "{:,.1f}x" }
-        ], rows, highlight_key: :is_target)
+          { key: :ev_ebitda, label: "EV/EBITDA", numeric: true, format: "{:,.1f}x" }
+        ]
+        columns << { key: :ev_ebitda_ntm_text, label: "EV/NTM EBITDA", numeric: true, format: "{:,.1f}x" } if payload[:has_ntm]
+        columns << { key: :pe, label: "P/E", numeric: true, format: "{:,.1f}x" }
+        columns << { key: :pe_ntm, label: "NTM P/E", numeric: true, format: "{:,.1f}x" } if payload[:has_ntm]
+        columns << { key: :share_basis, label: "Shares" } if W.comps_share_basis?(payload)
+        rows = rows.map { |row| row.merge(ev_ebitda_ntm_text: W.ntm_cell(row, :ev_ebitda_ntm)) } if payload[:has_ntm]
+        weights = columns.size > 10 ? columns.map { |c| { name: 2.2, basis: 1.2, share_basis: 1.3 }.fetch(c[:key], 1.0) } : nil
+        table(pdf, columns, rows, highlight_key: :is_target, weights: weights)
         stats = payload[:stats] || {}
-        stat_rows = [[:ev_revenue, "EV / Revenue"], [:ev_ebitda, "EV / EBITDA"], [:pe, "P / E"]].map do |metric, label|
+        labels = payload[:labels] || {}
+        metrics = [[:ev_revenue, "EV / Revenue"], [:ev_ebitda, "EV / EBITDA"], [:pe, "P / E"]]
+        metrics += [[:ev_ebitda_ntm, "EV / NTM EBITDA"], [:pe_ntm, "NTM P / E"]] if payload[:has_ntm]
+        stat_rows = metrics.map do |metric, label|
           distribution = stats[metric] || {}
-          { multiple: label, **%i[min p25 median p75 max].to_h { |key| [key, distribution[key]] } }
+          { multiple: labels[metric].presence || label, **%i[min p25 median p75 max].to_h { |key| [key, distribution[key]] } }
         end
         spacer(pdf, 8)
         table(pdf, [
@@ -550,6 +625,7 @@ module Exporters
           { key: :p75, label: "75th", numeric: true, format: "{:,.1f}x" },
           { key: :max, label: "Max", numeric: true, format: "{:,.1f}x" }
         ], stat_rows)
+        footnotes(pdf, W.comps_footnotes(payload))
       when "precedent_transactions"
         table(pdf, [
           { key: :announced_on, label: "Announced" },
@@ -564,34 +640,50 @@ module Exporters
         note(pdf, payload[:note])
       when "dcf"
         projections = Array(payload[:projections])
+        extended = W.extended_dcf?(payload)
         column_drawing(pdf, projections.map { |p| p[:year].to_s }, projections.map { |p| p[:fcf] },
-                       title: "Unlevered free cash flow (#{currency}m)", width: pdf.bounds.width, height: 110)
+                       title: "Unlevered free cash flow (#{currency}m)", width: pdf.bounds.width, height: extended ? 92 : 110)
         spacer(pdf, 6)
-        table(pdf, [
-          { key: :year, label: "Year", format: "{:.0f}" },
-          { key: :revenue, label: "Revenue", numeric: true, format: "{:,.0f}" },
-          { key: :growth, label: "Growth", numeric: true, format: "{:.1%}" },
-          { key: :ebitda, label: "EBITDA", numeric: true, format: "{:,.0f}" },
-          { key: :ebit, label: "EBIT", numeric: true, format: "{:,.0f}" },
-          { key: :taxes, label: "Taxes", numeric: true, format: "{:,.0f}" },
-          { key: :capex, label: "Capex", numeric: true, format: "{:,.0f}" },
-          { key: :fcf, label: "UFCF", numeric: true, format: "{:,.0f}" },
-          { key: :pv_fcf, label: "PV", numeric: true, format: "{:,.0f}" }
-        ], projections)
-        note(pdf, payload[:note])
+        columns = W.dcf_columns(payload)
+        weights = columns.map { |c| c[:key] == :year ? 1.6 : 1.0 }
+        table(pdf, columns, W.dcf_table_rows(payload), highlight_key: :is_terminal, weights: weights)
+        if extended
+          # Item 18: the bridge with its cross-checks and the WACC build, side by side.
+          spacer(pdf, 8)
+          bridge = W.dcf_bridge_rows(payload)
+          build = W.wacc_rows(payload[:wacc_build])
+          half = (pdf.bounds.width - 18) / 2
+          needed = [bridge.size, build.size + 1].max * 13 + 10
+          pdf.start_new_page if pdf.cursor < needed && needed <= pdf.bounds.height
+          top = pdf.cursor
+          pdf.bounding_box([0, top], width: half) do
+            pairs(pdf, bridge, header: "Value bridge (#{currency})")
+          end
+          bottom_left = pdf.cursor
+          if build.any?
+            pdf.bounding_box([half + 18, top], width: half) do
+              pairs(pdf, build, header: "WACC build")
+            end
+          end
+          pdf.move_cursor_to([bottom_left, pdf.cursor].min)
+          footnotes(pdf, W.dcf_notes(payload))
+        else
+          note(pdf, payload[:note])
+        end
       when "dcf_sensitivity"
         heatmap_table(pdf, payload)
-        note(pdf, "Value per share (#{currency}); current share price " \
-                  "#{symbol_for(currency)}#{number(payload[:reference_price] || 0, 2)}.")
+        # A missing price says "not loaded", never $0.00.
+        note(pdf, W.sensitivity_note(payload))
       when "buyers"
         w = pdf.bounds.width
         table(pdf, [
           { key: :name, label: "Counterparty" },
           { key: :type, label: "Type" },
-          { key: :enterprise_value, label: "EV", numeric: true, format: "{:,.0f}" },
+          { key: :enterprise_value, label: "EV (#{currency}m)", numeric: true, format: "{:,.0f}" },
           { key: :relative_size, label: "EV vs target", numeric: true, format: "{:,.2f}x" },
           { key: :rationale, label: "Rationale" }
         ], Array(payload[:candidates]), col_widths: [w * 0.2, w * 0.1, w * 0.1, w * 0.12, w * 0.48])
+        footnotes(pdf, ["Enterprise values and multiples on #{payload[:basis_label]}."]) if payload[:basis_label].present?
       when "evidence_appendix"
         items = Array(payload[:items])
         paragraph(pdf, "No evidence pinned yet.", :body) if items.empty?

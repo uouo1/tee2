@@ -70,6 +70,11 @@ module ValuationSeed
   module_function
 
   def seed!(transactions: true)
+    # The whole suite shares one test database with classes that seed the demo
+    # corpus outside a transaction, so the demo's companies (same tickers) and
+    # deals may already be there: replace them rather than collide.
+    Company.where(ticker: COMPANIES.map { |spec| spec[:ticker] }).find_each(&:destroy)
+    Transaction.delete_all
     COMPANIES.each do |spec|
       company = Company.create!(
         spec.except(:fin).merge(sector: SECTOR, currency: "USD", description: "#{spec[:name]} (demo).")

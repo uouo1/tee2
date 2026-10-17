@@ -77,5 +77,8 @@ Rails.application.routes.draw do
     get "pitchbooks/:id/export", to: "pitchbooks#export"
     match "slides/:id", to: "slides#update", via: %i[patch post]
     delete "evidence/:id", to: "evidences#destroy"
+    # Unmatched API paths answer in JSON (404, or 405 with the allowed verbs)
+    # like the reference server, not with the HTML error page.
+    match "*path", to: "base#route_not_found", via: :all, format: false
   end
 end

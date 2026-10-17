@@ -204,6 +204,125 @@ class ExportersPptxTest < ActiveSupport::TestCase
   end
 
   FIXTURE_SLIDES = fixture_slides.freeze
+
+  # Payloads with the keys the audited Pitchbooks builders add (RAILS_PORT.md
+  # items 12-18 and 22), trimmed from a real NVG build on the seed corpus: the
+  # cover stamp, an unbridged implied-value line, flagged football-field
+  # ranges, comps with per-row basis, NTM columns and footnotes, a DCF with a
+  # stub, a WACC build, D&A / ΔNWC and a floored terminal year, an LTM row.
+  AUDITED_STAMP = { data_as_of: "2026-08-05", balance_sheet_date: "2026-06-30", documents_as_of: "2026-08-05",
+                    corpus_as_of: "2026-09-01", price_date: "2026-10-09", peer_price_date: "2026-10-09",
+                    built_at: "2026-10-17T21:57:05Z", built_on: "2026-10-17", code_version: "b10fb97" }.freeze
+  AUDITED_RANGES = [
+    { method: "Trading comps — NTM EV/EBITDA", low: 31.86, high: 44.5, mid: 38.18, basis: "11.5x–15.76x on NTM EBITDA of 540",
+      in_conclusion: true, reference: false, note: nil },
+    { method: "Trading comps — EV/Revenue", low: 24.13, high: 38.19, mid: 31.16, basis: "2.61x–4.0x on LTM Jun-26 revenue of 1840",
+      in_conclusion: false, reference: false,
+      note: "Target EBITDA margin 26.2% is outside the peer interquartile range 18.7%–23.4%: the revenue multiple is shown but not used in the conclusion." },
+    { method: "Precedent transactions — EV/EBITDA", low: nil, high: nil, mid: nil, basis: "no deals loaded", in_conclusion: false, reference: false, note: nil },
+    { method: "DCF", low: 27.27, high: 41.2, mid: 34.23, basis: "WACC 10.02% ±100bps", in_conclusion: true, reference: false, note: nil },
+    { method: "52-week trading range", low: 30.11, high: 46.72, mid: 38.41, basis: "Last twelve months of trading (reference only)",
+      in_conclusion: false, reference: true, note: nil }
+  ].freeze
+  AUDITED_PROJECTIONS = [
+    { year: 2026, revenue: 2149.1, growth: 0.168, ebitda: 571.7, ebitda_margin: 0.266, ebit: 459.9, taxes: 105.8, dep_amort: 111.8,
+      capex: 88.1, nwc_change: 3.7, fcf_full_year: 374.1, period_fraction: 0.25, fcf: 93.5, discount_period: 0.125,
+      discount_factor: 0.9881, pv_fcf: 92.4 },
+    { year: 2027, revenue: 2433.3, growth: 0.1323, ebitda: 657.0, ebitda_margin: 0.27, ebit: 530.5, taxes: 122.0, dep_amort: 126.5,
+      capex: 99.8, nwc_change: nil, fcf_full_year: 431.8, period_fraction: 1.0, fcf: 431.8, discount_period: 0.75,
+      discount_factor: 0.9309, pv_fcf: 402.0 }
+  ].freeze
+  AUDITED_WACC_BUILD = {
+    risk_free_rate: 0.0425, equity_risk_premium: 0.05, beta: 1.0, beta_assumed: true, cost_of_equity: 0.0925,
+    pre_tax_cost_of_debt: 0.06, tax_rate: 0.23, after_tax_cost_of_debt: 0.0462, weight_debt: 0.0486, weight_equity: 0.9514,
+    wacc: 0.0902, notes: ["Beta not loaded: market beta of 1.0 assumed, so the cost of equity is the market's.",
+                          "Risk-free rate, equity risk premium and debt spread are house defaults, not observations as of the valuation date."]
+  }.freeze
+  BRIDGE_NOTE = "Net debt unknown: enterprise value only, no equity bridge or per-share value."
+  COMPS_FOOTNOTE = "EBITDA = GAAP operating income plus D&A, unadjusted (no add-backs for stock-based compensation, " \
+                   "restructuring or other items)."
+
+  def self.audited_slides
+    [
+      SlideFixture.new(kind: "cover", title: "Project Stamp", subtitle: "Strategic alternatives for NovaGrid Systems",
+                       payload_hash: { client_name: nil, target: "NovaGrid Systems", ticker: "NVG", banker: nil,
+                                       date: "17 October 2026", confidential: true, stamp: AUDITED_STAMP }),
+      SlideFixture.new(kind: "executive_summary", title: "Executive summary", subtitle: "NovaGrid Systems — situation assessment",
+                       payload_hash: { bullets: [{ text: "NovaGrid Systems (NVG) trades at $44.10 per share." }],
+                                       reference_range: { low: nil, high: nil, methods: [] }, share_price: 44.1,
+                                       price_date: "2026-10-09", currency: "USD", basis_label: "LTM Jun-26",
+                                       target_margin: 0.262, peer_median_margin: 0.209, peer_count: 6 }),
+      SlideFixture.new(kind: "company_overview", title: "NovaGrid Systems — company overview", subtitle: nil,
+                       payload_hash: { description: "NovaGrid sells a cloud platform to utilities.",
+                                       kpis: [{ label: "Share price", value: "$44.10" }],
+                                       extracted_kpis: [{ label: "Gross margin", value: "63.6%", observations: 7, unit: "%", period: "2026-07-23", measure: nil }],
+                                       basis_label: "LTM Jun-26", price_date: "2026-10-09", balance_sheet_date: nil,
+                                       debt_note: "No debt line was filed, so the bridge assumes zero debt." }),
+      SlideFixture.new(kind: "financial_performance", title: "NovaGrid Systems — financial performance", subtitle: "USDm",
+                       payload_hash: { rows: [
+                         { fiscal_year: 2025, period_type: "FY", is_estimate: false, revenue: 1600.0, ebitda: 400.0, ebitda_margin: 0.25,
+                           ebit: 320.0, net_income: 240.0, eps: 1.3, capex: 70.0, dep_amort: 80.0 },
+                         { fiscal_year: 2026, period_type: "FY", is_estimate: true, revenue: nil, ebitda: nil, ebitda_margin: nil,
+                           ebit: nil, net_income: nil, eps: nil, capex: nil, dep_amort: nil }
+                       ], growths: [], revenue_cagr: nil, currency: "USD",
+                                       ltm: { fiscal_year: 2026, period_type: "LTM", is_estimate: false, revenue: 1700.0, ebitda: 440.0,
+                                              ebitda_margin: 0.2588, ebit: 350.0, net_income: 260.0, eps: 1.41, capex: 72.0,
+                                              dep_amort: 90.0, basis: "LTM Jun-26" },
+                                       note: "Revenue grew in the last fiscal year." }),
+      SlideFixture.new(kind: "valuation_summary", title: "Valuation summary", subtitle: "Implied value per share, USD · multiples on LTM Jun-26",
+                       payload_hash: { ranges: AUDITED_RANGES, reference_price: 44.1,
+                                       concluded_range: { low: 31.03, high: 44.8, methods: ["Trading comps — NTM EV/EBITDA", "DCF"] },
+                                       methods: ["Trading comps — NTM EV/EBITDA", "DCF"], axis: { min: 21.72, max: 59.16 },
+                                       currency: "USD", basis_label: "LTM Jun-26", price_date: "2026-10-09", dcf_note: nil }),
+      SlideFixture.new(kind: "trading_comps", title: "Trading comparables", subtitle: "USDm except per-share and multiples",
+                       payload_hash: {
+                         target: { ticker: "NVG", name: "NovaGrid Systems", is_target: true, share_price: 44.1, price_date: "2026-10-09",
+                                   market_cap: 8026.2, enterprise_value: 8436.2, net_debt: 410.0, net_debt_as_of: "2026-06-30",
+                                   shares_diluted: 182.0, shares_basic: 180.0, revenue: 1840.0, ebitda: 482.1, ebitda_margin: 0.262,
+                                   ev_revenue: 4.58, ev_ebitda: 17.5, pe: 28.27, fiscal_year: 2026, basis: "LTM Jun-26",
+                                   ev_revenue_ntm: 4.14, ev_ebitda_ntm: 15.63, pe_ntm: 25.04, ntm_ebitda_derived: false, share_basis: "diluted WA" },
+                         rows: [
+                           { ticker: "VLTR", name: "Voltara Networks", share_price: 37.14, price_date: "2026-10-08", market_cap: 8839.3,
+                             enterprise_value: 9819.3, net_debt_as_of: "2026-03-31", revenue: 2410.0, ebitda_margin: 0.281, ev_revenue: 4.07,
+                             ev_ebitda: 14.5, pe: 23.66, basis: "FY2026", ev_ebitda_ntm: 13.52, pe_ntm: nil, ntm_ebitda_derived: true,
+                             share_basis: "cover-page" },
+                           { ticker: "HLDX", name: "Helio Dynamics", share_price: 33.81, price_date: "2026-10-09", market_cap: 4767.0,
+                             enterprise_value: nil, revenue: 1320.0, ebitda_margin: 0.238, ev_revenue: nil, ev_ebitda: nil, pe: 26.0,
+                             basis: "LTM Jun-26", ev_ebitda_ntm: nil, pe_ntm: 23.4, ntm_ebitda_derived: false, share_basis: "diluted" }
+                         ],
+                         stats: { ev_revenue: { count: 1, min: 4.07, p25: 4.07, median: 4.07, p75: 4.07, max: 4.07 },
+                                  ev_ebitda: { count: 1, min: 14.5, p25: 14.5, median: 14.5, p75: 14.5, max: 14.5 },
+                                  pe: { count: 2, min: 23.66, p25: 24.2, median: 24.83, p75: 25.4, max: 26.0 },
+                                  ev_ebitda_ntm: { count: 1, min: 13.52, p25: 13.52, median: 13.52, p75: 13.52, max: 13.52 },
+                                  pe_ntm: { count: 1, min: 23.4, p25: 23.4, median: 23.4, p75: 23.4, max: 23.4 } },
+                         labels: { ev_revenue: "EV / Revenue", ev_ebitda: "EV / EBITDA", pe: "P / E", ev_ebitda_ntm: "EV / NTM EBITDA", pe_ntm: "NTM P / E" },
+                         bases: { "FY2026" => 1, "LTM Jun-26" => 1 }, currency: "USD", basis_label: "LTM Jun-26",
+                         price_date: "2026-10-09", balance_sheet_date: "2026-06-30",
+                         share_count_basis: "Per-share figures: 1 on the diluted weighted-average count (shares_diluted) rather than the cover-page count (shares_basic).",
+                         has_ntm: true, ntm_derived: true, footnote: COMPS_FOOTNOTE
+                       }),
+      SlideFixture.new(kind: "dcf", title: "Discounted cash flow analysis", subtitle: "WACC 9.02% · Gordon growth at 2.5%",
+                       payload_hash: {
+                         projections: AUDITED_PROJECTIONS,
+                         terminal_year: { year: 2028, revenue: 2494.1, growth: 0.025, ebitda: 673.4, ebitda_margin: 0.27, ebit: 543.8,
+                                          taxes: 125.1, dep_amort: 129.6, capex: 129.6, capex_floored_at_da: true, nwc_change: 0.9, fcf: 418.4 },
+                         assumptions: { wacc: 0.0902, terminal_growth: 0.025, exit_multiple: nil, years: 2, mid_year_convention: true },
+                         wacc_build: AUDITED_WACC_BUILD, beta_assumed: true, stub_fraction: 0.25, valuation_date: "2026-10-09",
+                         terminal_method: "Gordon growth at 2.5%", terminal_value: 6991.2, pv_explicit: 494.4, pv_terminal: 5310.0,
+                         terminal_share_of_ev: 0.915, implied_exit_multiple: 10.38, implied_terminal_growth: 0.025,
+                         enterprise_value: 5804.4, net_debt: nil, other_claims: nil, equity_value: nil, value_per_share: nil,
+                         bridge_note: BRIDGE_NOTE, share_price: 44.1, currency: "USD",
+                         notes: ["Cash flows are discounted from the valuation date of 2026-10-09; the first projected year counts 25% of its cash flow (stub fraction 0.25).",
+                                 "Beta was not loaded for this company, so a market beta of 1.00 is assumed and the WACC is the house default build rather than company-specific."],
+                         note: "Base-case enterprise value of $5.8bn. #{BRIDGE_NOTE}"
+                       }),
+      SlideFixture.new(kind: "dcf_sensitivity", title: "DCF sensitivity", subtitle: "Implied value per share across WACC and terminal growth",
+                       payload_hash: { wacc_axis: [0.08, 0.09], terminal_axis: [0.02, 0.025], grid: [[nil, nil], [nil, nil]],
+                                       min: nil, max: nil, reference_price: nil, currency: "USD", bridge_note: BRIDGE_NOTE })
+    ]
+  end
+
+  AUDITED_SLIDES = audited_slides.freeze
   # Slide numbers (1-based) that carry native charts, and how many each has.
   CHART_SLIDES = { 5 => 1, 6 => 2, 7 => 1, 10 => 1 }.freeze
 
@@ -339,7 +458,8 @@ class ExportersPptxTest < ActiveSupport::TestCase
 
   test "text slides bullet every item and cite sources in a muted line under the bullet" do
     texts = texts_of(3)
-    assert_equal "Reference range $96.53 – $159.19 per share  ·  current $85.57", texts[2]
+    # Item 16: "implied value at peer multiples and DCF", not a "reference range".
+    assert_equal "Implied value at peer multiples and DCF $96.53 – $159.19 per share  ·  current $85.57", texts[2]
     assert_includes texts, "•  Backlog at quarter end was $4.4 billion compared with $4.5 billion in the prior year."
     cite = texts.find { |t| t.start_with?("     Source:") }
     assert_equal "     Source: Northvale Q2 earnings release · press-release · 2026-07-28 [doc 2]", cite
@@ -440,7 +560,9 @@ class ExportersPptxTest < ActiveSupport::TestCase
     assert_includes chart, %(<c:catAx><c:axId val="-2068027336"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="l"/>)
     assert_includes chart, %(<c:axPos val="b"/><c:majorGridlines>)
 
-    note = texts_of(7).last
+    # The detail line comes first; the conclusion sentence follows it (item 16).
+    note = texts_of(7).find { |text| text.start_with?("Current share price") }
+    assert_equal "Implied value at peer multiples and DCF of $96.53–$159.19 per share. Current price $85.57.", texts_of(7).last
     assert note.start_with?("Current share price: $85.57. "), note
     assert_includes note, "Trading comps — EV/EBITDA: $115.28–$176.39; "
     assert_includes note, "52-week trading range: $77.77–$142.00"
@@ -685,6 +807,194 @@ class ExportersPptxTest < ActiveSupport::TestCase
     assert_equal 10, report["tables"]
   end
 
+  # ------------------------------------------- audited payload keys (items 12-18, 22)
+
+  def audited_entries
+    @audited_entries ||= read_zip(Exporters::Pptx.write(Deck.new(title: "Project Stamp", slides: AUDITED_SLIDES),
+                                                        File.join(@dir, "audited.pptx")))
+  end
+
+  def audited_texts(number) = texts_in_xml(audited_entries["ppt/slides/slide#{number}.xml"])
+  def audited_tables(number) = tables_in(audited_entries["ppt/slides/slide#{number}.xml"])
+
+  test "the cover carries the stamp as a footer line" do
+    texts = audited_texts(1)
+    assert_equal "Data as of 2026-08-05 · prices as of 2026-10-09 · built 2026-10-17 · code b10fb97", texts.last
+    assert_includes audited_entries["ppt/slides/slide1.xml"], %(<a:off x="566928" y="6172200"/>) # Inches(6.75)
+    # A cover without a stamp (a deck built before item 22) has no footer line.
+    refute(texts_of(1).any? { |t| t.start_with?("Data as of") })
+  end
+
+  test "an unbridged implied range says so and no slide anywhere prints $0.00" do
+    assert_equal "Implied value at peer multiples and DCF: not bridged to a per-share value  ·  current $44.10 as of 2026-10-09  ·  " \
+                 "multiples on LTM Jun-26", audited_texts(2)[2]
+    audited_entries.each do |name, xml|
+      next unless name.start_with?("ppt/slides/slide") && name.end_with?(".xml")
+
+      refute_includes xml, "$0.00", "#{name} prints a missing figure as $0.00"
+      refute_includes xml, "upside", name
+    end
+  end
+
+  test "company overview carries the basis, price and balance-sheet dates and the debt note" do
+    texts = audited_texts(3)
+    assert_includes texts, "•  Gross margin: 63.6% (7 observations, latest 2026-07-23)"
+    assert_includes texts, "Multiples on LTM Jun-26; price as of 2026-10-09; balance sheet as of n/a. " \
+                           "No debt line was filed, so the bridge assumes zero debt."
+  end
+
+  test "financials add the LTM row to the table and chart a missing revenue as a gap, not zero" do
+    table = audited_tables(4).first
+    assert_equal ["LTM Jun-26", "1,700", "440", "25.9%", "350", "260", "1.41", "72"], table.last
+    assert_equal ["2026", "n/a", "n/a", "n/a", "n/a", "n/a", "n/a", "n/a"], table[2]
+    rels = relationships(audited_entries["ppt/slides/_rels/slide4.xml.rels"])
+    column = audited_entries.fetch(rels.values.find { |r| r[:type].end_with?("/chart") }[:target].sub("../", "ppt/"))
+    values = column[%r{<c:val>.*?</c:val>}m]
+    assert_includes values, %(<c:ptCount val="2"/>)
+    assert_includes values, %(<c:pt idx="0"><c:v>1600.0</c:v></c:pt>)
+    refute_includes values, %(<c:pt idx="1">)
+  end
+
+  test "football field mutes reference and excluded ranges inside the span series and drops an unbounded range" do
+    rels = relationships(audited_entries["ppt/slides/_rels/slide5.xml.rels"])
+    chart = audited_entries.fetch(rels.values.find { |r| r[:type].end_with?("/chart") }[:target].sub("../", "ppt/"))
+    base, span = chart.scan(%r{<c:ser>.*?</c:ser>}m)
+    assert_includes base, %(<c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr>)
+    refute_includes base, "<c:dPt>"
+    categories = span[%r{<c:cat>.*?</c:cat>}m].scan(%r{<c:v>(.*?)</c:v>}).flatten
+    # Reversed, without the precedent range that has no low/high.
+    assert_equal ["52-week trading range", "DCF", "Trading comps — EV/Revenue", "Trading comps — NTM EV/EBITDA"], categories
+    muted = Exporters::Pptx::MUTED
+    assert_includes span, %(<c:dPt><c:idx val="0"/><c:invertIfNegative val="0"/><c:bubble3D val="0"/><c:spPr><a:solidFill><a:srgbClr val="#{muted}"/></a:solidFill></c:spPr></c:dPt>)
+    assert_includes span, %(<c:dPt><c:idx val="2"/>)
+    refute_includes span, %(<c:dPt><c:idx val="1"/>)
+    refute_includes span, %(<c:dPt><c:idx val="3"/>)
+    # Schema order inside c:ser: spPr, then dPt, then cat.
+    assert_operator span.index("<c:spPr>"), :<, span.index("<c:dPt>")
+    assert_operator span.rindex("</c:dPt>"), :<, span.index("<c:cat>")
+
+    texts = audited_texts(5)
+    detail = texts.find { |t| t.start_with?("Current share price") }
+    assert_equal "Current share price: $44.10 as of 2026-10-09. Trading comps — NTM EV/EBITDA: $31.86–$44.50; " \
+                 "Trading comps — EV/Revenue: $24.13–$38.19 (excluded); Precedent transactions — EV/EBITDA: n/a (excluded); " \
+                 "DCF: $27.27–$41.20; 52-week trading range: $30.11–$46.72 (reference only)", detail
+    assert_includes texts, "Implied value at peer multiples and DCF of $31.03–$44.80 per share: the median low and median high of " \
+                           "the 2 methods in the conclusion (Trading comps — NTM EV/EBITDA, DCF). The 52-week range is shown " \
+                           "for reference only. Current price $44.10 as of 2026-10-09."
+    assert(texts.any? { |t| t.start_with?("Bases (multiples on LTM Jun-26) — Trading comps — NTM EV/EBITDA: 11.5x–15.76x on NTM EBITDA of 540") })
+    assert(texts.any? { |t| t.start_with?("Trading comps — EV/Revenue: Target EBITDA margin 26.2% is outside") })
+  end
+
+  test "an unconcluded valuation says the methods could not be bridged" do
+    payload = AUDITED_SLIDES[4].payload_hash.merge(concluded_range: { low: nil, high: nil, methods: [] }, methods: [],
+                                                   dcf_note: BRIDGE_NOTE)
+    slide = SlideFixture.new(kind: "valuation_summary", title: "Valuation summary", subtitle: nil, payload_hash: payload)
+    xml = Exporters::Pptx.build(Deck.new(title: "Nil", slides: [slide])).parts["ppt/slides/slide1.xml"]
+    assert_includes texts_in_xml(xml), "The methods could not be bridged to a per-share value, so no concluded range is stated. #{BRIDGE_NOTE}"
+    refute_includes xml, "$0.00"
+  end
+
+  test "comps name each row's basis, add the NTM columns and the share basis, and footnote dates and the EBITDA definition" do
+    comps, distribution = audited_tables(6)
+    assert_equal ["Ticker", "Company", "Basis", "Price", "Mkt cap (USDm)", "EV (USDm)", "Revenue", "EBITDA margin", "EV/Rev",
+                  "EV/EBITDA", "EV/NTM EBITDA", "P/E", "NTM P/E", "Shares"], comps.first
+    assert_equal ["NVG", "NovaGrid Systems", "LTM Jun-26", "44.10", "8,026", "8,436", "1,840", "26.2%", "4.6x", "17.5x", "15.6x",
+                  "28.3x", "25.0x", "diluted WA"], comps[1]
+    assert_equal "13.5x†", comps[2][10] # derived NTM EBITDA is flagged
+    assert_equal "n/a", comps[2][12]
+    assert_equal ["HLDX", "Helio Dynamics", "LTM Jun-26", "33.81", "4,767", "n/a"], comps[3].first(6)
+    assert_equal ["EV / NTM EBITDA", "13.5x", "13.5x", "13.5x", "13.5x", "13.5x"], distribution[4]
+    assert_equal ["NTM P / E", "23.4x", "23.4x", "23.4x", "23.4x", "23.4x"], distribution[5]
+    texts = audited_texts(6)
+    assert_includes texts, "Prices as of 2026-10-09; balance sheets as of 2026-06-30; target multiples on LTM Jun-26. " \
+                           "Per-share figures: 1 on the diluted weighted-average count (shares_diluted) rather than the cover-page count (shares_basic)."
+    assert_includes texts, "NTM EBITDA marked derived is consensus revenue at the current margin: no public source publishes consensus EBITDA."
+    assert_includes texts, COMPS_FOOTNOTE
+    xml = audited_entries["ppt/slides/slide6.xml"]
+    # Wider Company column; the 14 widths add up to the frame width.
+    widths = xml[%r{<a:tblGrid>.*?</a:tblGrid>}m].scan(/w="(\d+)"/).flatten.map(&:to_i)
+    assert_equal 14, widths.size
+    assert_equal Exporters::Pptx::CONTENT_W, widths.sum
+    assert_operator widths[1], :>, widths[3] * 2
+    # The distribution follows the comps table (4 rows x 0.27in) instead of sitting at 5.35in.
+    assert_includes xml, %(<a:off x="566928" y="2423160"/>)
+  end
+
+  test "DCF shows the bridge with cross-checks, the WACC build, D&A, ΔNWC, the stub and the terminal year" do
+    bridge, build, projections = audited_tables(7)
+    assert_equal [["PV of forecast FCF", "$494m"], ["PV of terminal value", "$5,310m"], ["Enterprise value", "$5,804m"],
+                  ["Equity value", "not bridged"], ["Value per share", "not bridged"], ["Current share price", "$44.10"],
+                  ["Implied exit multiple", "10.4x"], ["Implied terminal growth", "2.5%"],
+                  ["Stub fraction · valuation date", "0.25 · 2026-10-09"]], bridge
+    assert_equal ["WACC build", ""], build.first
+    assert_includes build, ["Beta (assumed — not loaded)", "1.00"]
+    assert_includes build, ["Debt / equity weights", "4.9% / 95.1%"]
+    assert_equal ["WACC (built)", "9.02%"], build.last
+    assert_equal ["Year", "Revenue", "Growth", "EBITDA", "D&A", "EBIT", "Taxes", "Capex", "ΔNWC", "UFCF", "Fraction", "Counted", "PV"],
+                 projections.first
+    assert_equal ["2026", "2,149", "16.8%", "572", "112", "460", "106", "88", "4", "374", "0.25", "94", "92"], projections[1]
+    assert_equal "n/a", projections[2][8] # missing ΔNWC
+    assert_equal ["Terminal (2028)", "2,494", "2.5%", "673", "130", "544", "125", "130*", "1", "418", "—", "—", "5,310"], projections[3]
+    texts = audited_texts(7)
+    assert_includes texts, "Base-case enterprise value of $5.8bn. #{BRIDGE_NOTE}"
+    refute_includes texts, BRIDGE_NOTE # quoted inside the value sentence, not repeated
+    assert(texts.any? { |t| t.start_with?("Cash flows are discounted from the valuation date of 2026-10-09") })
+    assert_includes texts, "Beta not loaded: market beta of 1.0 assumed, so the cost of equity is the market's."
+    assert_includes texts, "Terminal value $6,991m (Gordon growth at 2.5%), present value $5,310m."
+    xml = audited_entries["ppt/slides/slide7.xml"]
+    assert_includes xml, %(<a:off x="8138160" y="1325880"/>) # WACC build at 8.9in beside the bridge
+  end
+
+  test "sensitivity without a price says not loaded and repeats the bridge note" do
+    texts = audited_texts(8)
+    assert_includes texts, "Value per share (USD); current share price not loaded. #{BRIDGE_NOTE}"
+    assert_equal ["2.00%", "n/a", "n/a"], audited_tables(8).first[1]
+  end
+
+  test "python-pptx opens the audited deck and reads the muted points and the extra tables" do
+    path = File.join(@dir, "audited.pptx")
+    audited_entries
+    script = <<~PY
+      from pptx import Presentation
+      import json, sys
+      p = Presentation(sys.argv[1])
+      report = {"slides": len(p.slides._sldIdLst), "charts": [], "tables": 0}
+      for s in p.slides:
+          for sh in s.shapes:
+              if sh.has_chart:
+                  plot = sh.chart.plots[0]
+                  report["charts"].append([str(sh.chart.chart_type).split()[0], [se.name for se in plot.series],
+                                           [len(se._element.dPt_lst) for se in plot.series]])
+              elif sh.has_table:
+                  report["tables"] += 1
+      print(json.dumps(report))
+    PY
+    output, status = Open3.capture2e("python3", "-I", "-c", "import pptx", { chdir: @dir })
+    skip "python-pptx not available for verification (#{output.strip})" unless status.success?
+
+    output, status = Open3.capture2e("python3", "-I", "-c", script, path, { chdir: @dir })
+    assert status.success?, "python-pptx failed to open the deck: #{output}"
+    report = JSON.parse(output.lines.last)
+    assert_equal AUDITED_SLIDES.size, report["slides"]
+    assert_equal [
+      ["COLUMN_CLUSTERED", ["Revenue (USDm)"], [0]],
+      ["LINE_MARKERS", ["EBITDA margin"], [0]],
+      ["BAR_STACKED", ["Base", "Range"], [0, 2]],
+      ["COLUMN_CLUSTERED", ["Unlevered FCF (USDm)"], [0]]
+    ], report["charts"]
+    # Overview KPIs, financials, comps x2, bridge + WACC build + projections, sensitivity.
+    assert_equal 8, report["tables"]
+  end
+
+  test "SlideXml column widths override the equal split and the last column absorbs the remainder" do
+    package = Exporters::Pptx::Package.new(title: "Widths", theme_colors: Exporters::Pptx::THEME_COLORS)
+    page = package.add_slide
+    page.table(0, 0, 1000, 300, [[{ text: "a" }, { text: "b" }, { text: "c" }]], col_widths: [500, 200, 999])
+    assert_includes page.to_xml, %(<a:tblGrid><a:gridCol w="500"/><a:gridCol w="200"/><a:gridCol w="300"/></a:tblGrid>)
+    page.table(0, 0, 1000, 300, [[{ text: "a" }, { text: "b" }]], col_widths: [1])
+    assert_includes page.to_xml, %(<a:tblGrid><a:gridCol w="500"/><a:gridCol w="500"/></a:tblGrid>) # wrong count: equal split
+  end
+
   private
 
   def read_zip(path)
@@ -717,8 +1027,10 @@ class ExportersPptxTest < ActiveSupport::TestCase
   end
 
   # Every <a:t> on slide `number`, in document order; <a:br/> joins runs within a paragraph.
-  def texts_of(number)
-    doc = parse_xml(@entries["ppt/slides/slide#{number}.xml"])
+  def texts_of(number) = texts_in_xml(@entries["ppt/slides/slide#{number}.xml"])
+
+  def texts_in_xml(slide_xml)
+    doc = parse_xml(slide_xml)
     doc.xpath("//a:p", NS).filter_map do |para|
       runs = para.xpath("./a:r/a:t", NS).map(&:text)
       runs.join unless runs.empty?
@@ -741,5 +1053,74 @@ class ExportersPptxTest < ActiveSupport::TestCase
     rels = relationships(@entries["ppt/slides/_rels/slide#{number}.xml.rels"])
     target = rels.values.select { |rel| rel[:type].end_with?("/chart") }[index][:target]
     @entries.fetch(target.sub("../", "ppt/"))
+  end
+end
+
+# The writer against decks the Pitchbooks module actually builds on the seed
+# corpus: a bridged NVG deck and one whose net debt (and beta) are not loaded.
+# Seeded once, not in a transaction; each deck is built and exported inside a
+# rolled-back transaction, so the database keeps no pitch book and NVG's
+# market data is unchanged.
+class ExportersPptxBuiltDeckTest < ActiveSupport::TestCase
+  self.use_transactional_tests = false
+
+  setup do
+    Seed::Demo.seed! unless Document.exists?
+    @dir = Dir.mktmpdir("argos-pptx-built")
+  end
+
+  teardown { FileUtils.remove_entry(@dir) if @dir && File.exist?(@dir) }
+
+  def export(unloaded: false)
+    entries = {}
+    ActiveRecord::Base.transaction do
+      Company.find_ticker("NVG").market_datum.update_columns(net_debt: nil, beta: nil) if unloaded
+      book = Pitchbooks.create!(title: "Built", target_ticker: "NVG")
+      @kinds = book.slides.map(&:kind)
+      @path = Exporters::Pptx.write(book, File.join(@dir, "#{unloaded ? 'nil' : 'nvg'}.pptx"))
+      raise ActiveRecord::Rollback
+    end
+    Zip::File.open(@path.to_s) { |zip| zip.each { |e| entries[e.name] = e.get_input_stream.read.force_encoding(Encoding::UTF_8) unless e.name.end_with?(".xlsx") } }
+    entries
+  end
+
+  def slide_xml(entries, kind) = entries.fetch("ppt/slides/slide#{@kinds.index(kind) + 1}.xml")
+
+  def python_pptx_slide_count(path)
+    output, status = Open3.capture2e("python3", "-I", "-c", "import pptx")
+    skip "python-pptx not available for verification (#{output.strip})" unless status.success?
+
+    output, status = Open3.capture2e("python3", "-I", "-c",
+                                     "import sys; from pptx import Presentation; print(len(Presentation(sys.argv[1]).slides))", path.to_s)
+    assert status.success?, output
+    output.lines.last.to_i
+  end
+
+  test "a built deck exports with the stamp, the basis labels, the NTM columns and the DCF build" do
+    entries = export
+    assert_equal 0, Pitchbook.count
+    assert_match(/Data as of \d{4}-\d{2}-\d{2} · prices as of \d{4}-\d{2}-\d{2} · built \d{4}-\d{2}-\d{2} · code \S+/, slide_xml(entries, "cover"))
+    comps = slide_xml(entries, "trading_comps")
+    %w[Basis EV/NTM\ EBITDA NTM\ P/E Shares EBITDA\ =\ GAAP\ operating\ income].each { |text| assert_includes comps, text }
+    dcf = slide_xml(entries, "dcf")
+    ["WACC build", "D&amp;A", "ΔNWC", "Terminal (", "Implied exit multiple", "Stub fraction · valuation date"].each { |text| assert_includes dcf, text }
+    valuation = slide_xml(entries, "valuation_summary")
+    assert_includes valuation, "Implied value at peer multiples and DCF of"
+    assert_includes valuation, "(reference only)"
+    entries.each { |name, xml| refute_includes xml, "$0.00", name if name.start_with?("ppt/slides/slide") }
+    assert(entries.any? { |name, xml| name.start_with?("ppt/charts/chart") && xml.include?("<c:dPt>") }, "52-week range drawn muted")
+    assert_equal @kinds.size, python_pptx_slide_count(@path)
+  end
+
+  test "a deck without net debt says not bridged instead of printing $0.00" do
+    before = Company.find_ticker("NVG").market_datum.net_debt
+    entries = export(unloaded: true)
+    assert_equal before, Company.find_ticker("NVG").market_datum.reload.net_debt
+    entries.each { |name, xml| refute_includes xml, "$0.00", name if name.start_with?("ppt/slides/slide") }
+    assert_includes slide_xml(entries, "executive_summary"), "Implied value at peer multiples and DCF: not bridged to a per-share value"
+    assert_includes slide_xml(entries, "dcf"), "<a:t>not bridged</a:t>"
+    assert_includes slide_xml(entries, "dcf"), "Beta (assumed — not loaded)"
+    assert_includes slide_xml(entries, "valuation_summary"), "The methods could not be bridged to a per-share value"
+    assert_equal @kinds.size, python_pptx_slide_count(@path)
   end
 end
