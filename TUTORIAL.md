@@ -10,18 +10,15 @@ its valuation page is made of.
 Everything below was run on 12–13 October 2026. Prices move and companies file,
 so your figures will differ in detail; the shape of the exercise will not.
 
-> **Read before trusting the numbers (added 17 October 2026).** An
-> investment-analyst audit of this tutorial's output (`docs/AUDIT.md`) found
-> that the Itron valuation below is overstated: net debt was read from the
-> December 2025 10-K ($228m) while the June 2026 10-Q in the same corpus shows
-> about $830m after a $600m convertible, so EV/EBITDA is nearer 12.7x than
-> 11.0x and the DCF base nearer $75 than $89; the multiples are on fiscal 2025
-> rather than the latest twelve months; the WACC is a constant; and the
-> "+13% to +86%" wording treats a peer-multiple range as upside, which the
-> repository's own backtest does not support. The Rails services in `app/`
-> correct the mechanics (`docs/RAILS_PORT.md`, items 11–22); the Python build
-> this tutorial drives does not. The search count "15 documents" for `tariff`
-> is also a known artefact of top-k chunk ranking (its facet says 28).
+> **Revised 17 October 2026 after an independent audit** (`docs/AUDIT.md`).
+> The first version of this tutorial bridged the valuation through a net-debt
+> figure from the December 2025 10-K, quoted multiples on fiscal 2025, used a
+> constant WACC and described a peer-multiple range as "upside". The loader and
+> the valuation now use the latest 10-Q balance sheet, LTM and consensus NTM
+> figures, a built-up WACC and a conclusion that excludes reference bars, and
+> every figure below was regenerated with that code on 16–17 October 2026
+> prices. One known artefact remains in this Python build: broad search counts
+> can be lower than their facets (the Rails port corrects it).
 
 > **Data sources.** Fundamentals and filings come from SEC EDGAR's public APIs
 > (`data.sec.gov`, `sec.gov/Archives`). The quote comes from a public quote
@@ -77,7 +74,10 @@ seconds):
   "loaded": [
     {"ticker": "ITRI", "name": "Itron, Inc.", "cik": "0000780571",
      "fiscal_years": [2020, 2021, 2022, 2023, 2024, 2025],
-     "latest_revenue": 2367.2, "share_price": 85.57, "documents_added": 7},
+     "latest_revenue": 2367.2, "ltm_period_end": "2026-06-30",
+     "shares_basis": "weighted_diluted", "net_debt_as_of": "2026-06-30",
+     "estimate_years": [2026, 2027], "share_price": 83.04,
+     "quote_as_of": "2026-10-16", "documents_added": 7},
     ...
   ]
 }
@@ -85,7 +85,7 @@ seconds):
 
 ### What just happened
 
-For each ticker the loader did four things, and it is worth knowing which
+For each ticker the loader did five things, and it is worth knowing which
 number came from where, because that is what makes the deck defensible later.
 
 **1. Resolved the company.** `sec.gov/files/company_tickers.json` maps ITRI to
@@ -106,8 +106,14 @@ filers tag the same line differently:
 | EBIT | `OperatingIncomeLoss` |
 | D&A | `DepreciationDepletionAndAmortization` …, else `Depreciation` + `AmortizationOfIntangibleAssets` |
 | Net income, EPS, capex, pre-tax income, tax | the usual `us-gaap` tags |
-| Net debt | `LongTermDebtCurrent` + `LongTermDebtNoncurrent` − cash − short-term investments, at fiscal year end |
-| Shares | cover-page `EntityCommonStockSharesOutstanding`, else weighted diluted (multi-class filers) |
+| Net debt | `LongTermDebtCurrent` + `LongTermDebtNoncurrent` (else a total-debt tag) − cash − short-term investments, read at the **latest balance sheet** in the facts, 10-K or 10-Q, with its date stored; `MinorityInterest` and preferred stock are deducted in the EV bridge |
+| Shares | weighted diluted `WeightedAverageNumberOfDilutedSharesOutstanding` when it is from the latest fiscal year and within 0.5–2× of the cover-page count, else the cover page; the cover-page count is kept as "basic" |
+| LTM | fiscal year + latest 10-Q year-to-date − prior-year year-to-date, per line, on the fiscal year's own tag |
+| Consensus | revenue and EPS for the fiscal year in progress and the next, plus beta, from the public quote summary |
+
+Tags are resolved **per year**: a filer that switched tags keeps every year,
+and a revenue tag worth less than a fifth of another tag's figure for the same
+year is treated as a sub-line, not the total.
 
 **EBITDA is operating income plus D&A.** That is the standard proxy and it is
 *not* the "adjusted EBITDA" a company reports in its own release (which adds
@@ -125,13 +131,24 @@ Here is what came back for Itron (USD millions, fiscal years to 31 December):
 | 2024 | 2,440.8 | 320.4 | 264.1 | 239.1 | 5.18 | 30.6 | 15.3% |
 | 2025 | 2,367.2 | 362.6 | 313.1 | 301.1 | 6.50 | 22.9 | 11.4% |
 
-Net debt at FY2025: $1,248.3m of debt (convertible notes, current and
-non-current) less $1,020.4m of cash = **$227.9m**. Shares outstanding from the
-latest cover page: **43.79m**.
+The trailing twelve months to 30 June 2026 (FY2025 plus the first half of 2026
+less the first half of 2025): revenue **2,303.2**, EBITDA **366.6**, EPS 5.98.
+That row, labelled "LTM Jun-26", is what the multiples are quoted on.
 
-**3. Fetched a quote**: $85.57 on 12 October 2026, 52-week range $77.77–$142.00.
+Net debt at the latest balance sheet (10-Q, 30 June 2026): $1,575.2m of debt
+less $745.2m of cash = **$830.0m**, plus $21.9m of non-controlling interest
+deducted in the bridge. The December 2025 10-K showed $227.9m; the February 2026
+convertible and the buyback since then are why the bridge reads the newest
+filing, not the last fiscal year end. Shares: **46.32m** diluted weighted
+average for FY2025 (the per-share basis), 43.79m on the cover page.
 
-**4. Downloaded the filings and indexed them.** The latest 10-K, the two most
+**3. Fetched a quote**: $83.04 on 16 October 2026, 52-week range $77.77–$142.00.
+
+**4. Fetched consensus and beta**: FY2026 revenue $2,388m and EPS $6.42, FY2027
+$2,553m and $7.00 (9 analysts), beta 1.32. These become estimate rows and feed
+the NTM multiples and the WACC build.
+
+**5. Downloaded the filings and indexed them.** The latest 10-K, the two most
 recent 10-Qs and the four most recent 8-K earnings releases (the loader finds
 the EX-99.1 exhibit inside each 8-K; filers name that file every way
 imaginable). Each document is converted from inline-XBRL HTML to paragraphs,
@@ -179,9 +196,10 @@ Notice the line under the result count: `matched on ("backlog" OR "rpo" OR
 by default because filings and analysts use different words for the same
 thing; untick **Expand synonyms** to see only literal matches.
 
-Try a few more. `tariff` finds 15 documents across the set — Watts, Badger
-Meter and Xylem all discuss reciprocal tariffs and the Supreme Court case in
-their 2026 10-Qs. `margin expansion type:press-release` surfaces Vontier's
+Try a few more. `tariff` lists 15 documents across the set (its facet counts
+28: this Python build ranks a top slice of passages before collapsing to
+documents, an artefact the Rails port removes) — Watts, Badger Meter and Xylem
+all discuss reciprocal tariffs and the Supreme Court case in their 2026 10-Qs. `margin expansion type:press-release` surfaces Vontier's
 guidance language ("adjusted operating profit margin expansion of approximately
 110 basis points"). `"data center" OR datacenter` shows Badger Meter attributing
 component demand to hyperscale build-out.
@@ -196,10 +214,11 @@ deck** button on every passage. We will use that in step 5.
 
 ![Itron company page](docs/images/real-company.png)
 
-Tiles show the live capital structure — $85.57, market cap $3.7bn, EV $4.0bn,
-11.0x EV/EBITDA, 15.3% margin. The revenue chart shows the FY2021–22 trough and
-recovery; the margin chart shows the expansion from 4% to 15% that is the whole
-Itron equity story. Below are the KPIs extracted from narrative text (gross
+Tiles show the live capital structure — $83.04, market cap $3.8bn, EV $4.7bn
+(net debt dated 30 June 2026), 12.8x LTM Jun-26 EV/EBITDA and 11.7x NTM,
+15.9% LTM margin. The revenue chart shows the FY2021–22 trough and recovery;
+the margin chart shows the expansion from 4% to 16% that is the whole Itron
+equity story. Below are the KPIs extracted from narrative text (gross
 margin observed 24 times, backlog five times, free cash flow six) with the
 sentence each came from.
 
@@ -246,42 +265,70 @@ the market overview is the theme model run across the whole set.
 
 ![Valuation summary](docs/images/real-valuation.png)
 
-This is the slide that matters, so here is every bar.
+This is the slide that matters, so here is every bar. Every multiple names its
+basis, and the slide says which bars the conclusion rests on.
 
-**Trading comps — EV/EBITDA: $115–$176.** The six peers trade between 9.6x
-(Vontier) and 23.4x (Zebra) FY2025 EBITDA. Argos takes the interquartile range,
-14.55x–21.93x, applies it to Itron's $362.6m of EBITDA, subtracts $227.9m of
-net debt and divides by 43.79m shares.
+**Trading comps — NTM EV/EBITDA: $107–$136.** The six peers trade between 10.0x
+(Vontier) and 18.5x (Watts) next-twelve-month EBITDA. Argos takes the
+interquartile range, 14.43x–17.84x, applies it to Itron's NTM EBITDA of $401m,
+subtracts $830m of net debt and $21.9m of non-controlling interest, and divides
+by 46.32m diluted shares. Itron's NTM EBITDA is *derived*: consensus publishes
+revenue and EPS, not EBITDA, so NTM revenue ($2,519m, 21% of FY2026 and 79% of
+FY2027 at the 16 October price date) is run at the LTM margin, and the slide
+says so.
 
-**Trading comps — EV/Revenue: $154–$221.** Same mechanics on 2.94x–4.19x
-revenue.
+**Trading comps — LTM EV/EBITDA: $103–$139.** The same peers on trailing EBITDA
+trade between 10.0x (Vontier) and 20.5x (Watts); the interquartile range
+15.31x–19.85x applied to $366.6m of LTM EBITDA.
 
-**DCF: $73–$115, base case $89.48.** Five years of unlevered free cash flow,
-mid-year discounting, Gordon-growth terminal value. The assumptions are seeded
-from Itron's own filings: year-one revenue growth −3.0% (FY2025 was down on
-FY2024), fading toward 2.5% terminal growth; 15.3% EBITDA margin expanding 40bps
-a year; capex at 1.0% of revenue; working-capital investment at 1.8% of
-revenue (a three-year average); tax at the 15% floor of a normalised band
-(Itron's filed effective rate was 11.4%); WACC 9.5%. The bar is the range across
-WACC ±100bps and terminal growth ±50bps; the full sensitivity grid is the next
-slide.
+![Trading comparables](docs/images/real-comps.png)
 
-**52-week range: $78–$142.** Where the market has actually been.
+**Trading comps — EV/Revenue: $138–$187, shown but excluded.** Itron's 15.9%
+EBITDA margin is below the peers' interquartile range (20.5%–21.5%), so a
+revenue multiple prices a more profitable business than Itron is. The bar is
+drawn, marked excluded, and left out of the conclusion.
 
-**Concluded range: $96.53–$159.19** — the median of the lows and the median of
-the highs. Not the widest bar, and not the narrowest: one methodology cannot
-dictate the answer.
+**DCF: $56–$91, base case $69.59.** Five years of unlevered free cash flow from
+the valuation date, mid-year discounting, Gordon-growth terminal value. The
+assumptions are seeded from Itron's own filings: year-one revenue growth −3.0%
+(FY2025 was down on FY2024), interpolating linearly to 2.5% terminal growth;
+15.9% LTM EBITDA margin expanding 40bps a year; D&A 2.7% and capex 1.1% of
+revenue, with terminal-year capex floored at D&A; working-capital investment at
+1.8% of the *change* in revenue; tax at the 15% floor of a normalised band
+(Itron's filed effective rate was 11.4%). Only the 21% of FY2026 still ahead on
+16 October counts, and every flow is discounted from that date. The WACC is
+built, not assumed: a 4.25% risk-free rate plus beta 1.32 × a 5% equity premium
+gives a 10.86% cost of equity; debt at 6.0% pre-tax carries a 17.8% weight;
+WACC 9.83%. The terminal value is 73% of enterprise value and implies a 10.1x
+exit multiple, both printed on the slide. The bar is the range across WACC
+±100bps and terminal growth ±50bps; the full sensitivity grid is the next slide.
+
+![DCF slide](docs/images/real-dcf.png)
+
+**52-week range: $78–$142, reference only.** Where the market has been is not
+a valuation method, so it is drawn for context and never averaged in.
+
+**Concluded range: $102.78–$136.05** — the median of the lows and the median of
+the highs across the three methods in the conclusion (NTM comps, LTM comps,
+DCF). Not the widest bar, and not the narrowest: one methodology cannot dictate
+the answer. The deck calls this "implied value at peer multiples and DCF", not
+upside: the repository's own backtest (`docs/backtests/comps-2016.md`) found
+no evidence that a cheap-versus-peers EV/EBITDA gap predicted forward returns,
+so a comps bar is a statement about relative pricing, not a forecast.
 
 ### Reading it honestly
 
-The comps bars sit well above the current price while the DCF straddles it.
-That is not a bug; it is the finding. Itron trades at 11.0x EBITDA against a
-peer set at 14.6x–21.9x because its margin (15.3%) is the lowest in the group —
-every peer "supports a cash offer with an accretive margin profile", as the
-counterparties slide puts it. A comps-driven valuation says "re-rate to the
-peers"; a cash-flow valuation says "the current price is about right for the
-cash this business generates today". A real pitch would argue which one the
-buyer should believe, and this page gives you both with their inputs exposed.
+The comps bars sit above the current price while the DCF sits below it. That
+is not a bug; it is the finding. Itron trades at 12.8x LTM EBITDA against a
+peer interquartile range of 15.3x–19.9x because its margin (15.9%) is the
+lowest in the group — the executive summary now says exactly that, "below the
+peer median of 21.1% across 6 peers", and the counterparties slide quotes each
+peer's margin and multiple against Itron's instead of calling every peer
+accretive. A comps-driven view says "re-rate to the peers"; a cash-flow view,
+with a 9.8% WACC and a 2.3x levered balance sheet after the 2026 convertible,
+says "the current price is about right for the cash this business generates
+today". A real pitch would argue which one the buyer should believe, and this
+page gives you both with their inputs exposed.
 
 Change an input and watch it move: on the deck page, open **DCF assumptions —
 edit and rebuild**, set WACC to `0.11`, apply. The DCF bar drops; the comps bars
@@ -372,7 +419,12 @@ and you should know them before you put a number in front of anyone.
 * **The tax rate in the DCF is held between 15% and 35%**; a single year's
   effective rate is not a forecast.
 * **Multi-class filers** (Watts Water) have no single cover-page share count in
-  the facts feed; the loader falls back to the weighted diluted count.
+  the facts feed; the loader uses the weighted diluted count alone and leaves
+  the basic count blank. Badger Meter tags no debt line at all, so its net debt
+  is bridged at zero debt with a note saying so (`debt_note`).
+* **Net debt is read at the latest 10-K or 10-Q**, dated on the comps page.
+  Between filings it is stale by up to a quarter; a convertible issued since
+  the last balance sheet is not in it until the next 10-Q.
 * **Theme detection on filing text is noisy.** Earnings releases carry the
   signal ("tariff refunds", "Middle East conflict" rose in the last 180 days);
   10-Q boilerplate is filtered but not perfectly. Treat the market-overview
@@ -380,8 +432,12 @@ and you should know them before you put a number in front of anyone.
 * **The quote is a public endpoint**, unlicensed and occasionally unavailable.
   If a company loads with no market data, re-run; the fundamentals and filings
   are unaffected.
-* **Beta is not loaded**, so every company's WACC starts at the 9.5% default.
-  Set it per deck through the assumptions panel.
+* **Consensus and beta come from the same public quote endpoint as the
+  price**: unofficial and unlicensed, nine analysts for Itron. No source
+  publishes consensus EBITDA for free, so NTM EBITDA is derived from consensus
+  revenue at the current margin and labelled as such. The WACC build's
+  risk-free rate, equity premium and debt spread are house defaults printed on
+  the DCF slide; override them per deck through the assumptions panel.
 
 ---
 

@@ -397,13 +397,17 @@ def get_company_charts(conn, params, body, ticker: str) -> dict[str, Any]:
     profile = analytics.company_profile(conn, ticker)
     if not profile:
         raise ApiError(f"company {ticker} not found", 404)
-    financials = profile.get("financials") or []
-    labels = [f"FY{row['fiscal_year']}" for row in financials]
+    # Fiscal-year rows only: an LTM row would plot as a duplicate of the year it
+    # extends, and a consensus row carries revenue and EPS but no EBITDA, so its
+    # margin point is blank rather than a crash (found on the reloaded Itron data).
+    financials = [row for row in (profile.get("financials") or []) if row.get("period_type", "FY") == "FY"]
+    labels = [f"FY{row['fiscal_year']}{'E' if row.get('is_estimate') else ''}" for row in financials]
     estimate_from = next((i for i, row in enumerate(financials) if row["is_estimate"]), None)
     timeline = profile.get("sentiment_timeline") or []
     volume = analytics.volume_by_type(conn, ticker=ticker)
     margins = [
-        (float(row["ebitda"]) / float(row["revenue"]) * 100 if row.get("revenue") else None)
+        (float(row["ebitda"]) / float(row["revenue"]) * 100
+         if row.get("revenue") and row.get("ebitda") is not None else None)
         for row in financials
     ]
     return {

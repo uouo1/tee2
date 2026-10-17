@@ -2,7 +2,19 @@
 
 ## Headline
 
-An investment analyst and two engineering auditors reviewed the project; a third auditor and most of the verification agents did not run (organisation spend limit), so the lead-auditor synthesis below was written by the author from the raw findings, and every finding acted on was reproduced by the author before it was fixed. The Python build is a credible prototype whose data is genuine but whose Itron valuation is overstated by a stale net-debt figure, fiscal-year rather than trailing multiples, a constant WACC and several DCF mechanics; the backtest's statistics were confirmed exactly but its data construction had defects that changed the point estimates without changing the conclusion. The Rails services and the backtest now carry the fixes listed here with regression tests; the Python build does not, and the modules still to be ported carry new binding requirements (docs/RAILS_PORT.md, items 11–22).
+An investment analyst and two engineering auditors reviewed the project; a third auditor and most of the verification agents did not run (organisation spend limit), so the lead-auditor synthesis below was written by the author from the raw findings, and every finding acted on was reproduced by the author before it was fixed. The Python build is a credible prototype whose data is genuine but whose Itron valuation was overstated by a stale net-debt figure, fiscal-year rather than trailing multiples, a constant WACC and several DCF mechanics; the backtest's statistics were confirmed exactly but its data construction had defects that changed the point estimates without changing the conclusion. The Rails services, the backtest and (since the back-port of 17 October) the Python build now carry the fixes listed here with regression tests, and the modules still to be ported carry new binding requirements (docs/RAILS_PORT.md, items 11–22).
+
+### Itron after the fixes (real data reloaded 16 October 2026 prices, 30 June 2026 balance sheet)
+
+| Figure | Before the audit | After |
+|---|---:|---:|
+| Net debt used in the bridge | $227.9m (FY2025 10-K, Dec-2025) | $830.0m (10-Q, 30 Jun 2026) plus $21.9m non-controlling interest |
+| Enterprise value | $3.98bn | $4.70bn |
+| EV / EBITDA | 11.0x FY2025 | 12.8x LTM Jun-26, 11.7x NTM (derived) |
+| WACC | 9.5% constant, beta not loaded | 9.83% built (beta 1.32, 17.8% debt weight) |
+| DCF base case | $89.48 | $69.59 (stub 0.21 of FY2026, linear growth −3.0% to 2.5%) |
+| Concluded range | $96.53–$159.19 (52-week range averaged in; "+13% to +86% upside") | $102.78–$136.05 from NTM comps, LTM comps and DCF; the 52-week range and the revenue multiple on a margin outlier shown but excluded; no upside language |
+| Profitability sentence | "in line with the peer set" (hard-coded 22% threshold) | "15.9% EBITDA margin is below the peer median of 21.1% across 6 peers" |
 
 ## Scope and method
 
@@ -25,7 +37,7 @@ bin/rails "backtest:universe[2016,600]" && bin/rails "backtest:fundamentals[2016
 
 | Component | State on 17 October 2026 |
 |---|---|
-| Python application (`argos/`) | Complete and runnable; the only product with a UI today. Carries every valuation defect below; retained as the reference until the Rails port reaches parity, then deleted. |
+| Python application (`argos/`) | Complete and runnable; the only product with a UI today. Since 17 October it carries the same valuation, loader and prose fixes as the Rails services (back-ported; Python suite 311 tests green) and the real database has been reloaded with the fixed loader. Still open in Python only: the PPTX and PDF writers do not render the new slide keys (WACC build, terminal row, stamp, basis labels), search totals keep the top-k artefact (defect 5), and there is no staleness warning in the UI (item 22). Retained as the reference until the Rails port reaches parity, then deleted. |
 | Rails services ported and green | Nlp, Charts, Valuation (+DcfAssumptions), Sources::{Http,HtmlText,Market,Sec}, Exporters::{Pptx,Pdf}, Ingest, Seed::Demo, SearchIndex, Backtest::* (12 test files, all green after this audit's fixes). |
 | Rails modules not yet ported | Search, Analytics, Pitchbooks (slide builders), Exporters::Html and the deck views, the web UI (controllers, views, CSS, JS), the JSON API controllers, `lib/tasks/argos.rake`. `bin/rails server` boots but serves no product page. |
 | Real data | `data/real.db`: 7 companies (ITRI BMI XYL TRMB VNT ZBRA WTS), 49 documents (21 10-K/10-Q filings, 28 8-K press releases), six fiscal years each, one quote per name dated 12 October 2026. Itron FY2024 revenue $2,440.8m and net income $239.1m match the filed figures. |
@@ -117,7 +129,7 @@ Disputed in part: the analyst's "15–20% of a day's AlphaSense use" is a judgem
 
 ## Finance errors and the correct treatment
 
-Each error below is in the Python build; the Rails treatment is what the code now does.
+Each error below was in the Python build; the treatment is what both stacks now do.
 
 | Error | Correct treatment (now in Rails) |
 |---|---|
@@ -139,7 +151,7 @@ Yes, as stated, and more so after the re-run. The statistics were reproduced exa
 
 ## Recommendations, in order
 
-1. Port `Pitchbooks` and the deck views against `docs/RAILS_PORT.md` items 7 and 16–22, rendering `basis_label`, the EV bridge dates, the WACC build and the terminal-year row from the service output.
+1. Port `Pitchbooks` and the deck views against `docs/RAILS_PORT.md` items 7 and 16–22, rendering `basis_label`, the EV bridge dates, the WACC build and the terminal-year row from the service output (in progress). In the Python build the HTML renderer shows them; its PPTX and PDF writers do not yet.
 2. Port `Search` with document-level totals, multi-value filters and `date:` (items 5, 21), then `Analytics`, the API and the web UI; reload the real corpus with the fixed extractor and delete `argos/`.
 3. Add table-row and segment detection to KPI extraction and a period label on every tile (item 20) in `app/services/nlp.rb` and `ingest.rb`.
 4. Seed comp sets from the issuer's 10-K peer group and competitor mentions, and build a buyers list with ability-to-pay, in the `Pitchbooks` port.

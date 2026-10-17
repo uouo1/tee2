@@ -36,6 +36,23 @@ class HandlerTests(unittest.TestCase):
             api.get_document(self.conn, {}, {}, 10 ** 7)
         self.assertEqual(caught.exception.status, 404)
 
+    def test_company_charts_skip_ltm_rows_and_blank_margins_for_consensus_rows(self):
+        # The reloaded real data carries an LTM row and consensus rows without EBITDA;
+        # the margin line must blank those points, not raise, and the LTM row must not
+        # plot as a second FY column.
+        company_id = self.conn.execute("SELECT id FROM companies WHERE ticker = 'NVG'").fetchone()[0]
+        self.conn.execute(
+            "INSERT INTO financials (company_id, fiscal_year, period_type, period_end, is_estimate, revenue, ebitda) "
+            "VALUES (?, 2026, 'LTM', '2026-06-30', 0, 1900.0, 480.0)", (company_id,))
+        self.conn.execute(
+            "INSERT INTO financials (company_id, fiscal_year, period_type, period_end, is_estimate, revenue, ebitda, eps, estimate_source) "
+            "VALUES (?, 2031, 'FY', '2031-12-31', 1, 2500.0, NULL, 9.1, 'consensus (test)')", (company_id,))
+        self.conn.commit()
+        charts = api.get_company_charts(self.conn, {}, {}, "NVG")
+        self.assertIn("FY2031E", charts["revenue"])
+        self.assertNotIn("LTM", charts["revenue"])
+        self.assertIn("<svg", charts["margin"])
+
     def test_company_profile_and_charts(self):
         profile = api.get_company(self.conn, {}, {}, "nvg")
         self.assertEqual(profile["ticker"], "NVG")
