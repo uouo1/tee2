@@ -217,8 +217,9 @@ deck** button on every passage. We will use that in step 5.
 Tiles show the live capital structure — $83.04, market cap $3.8bn, EV $4.7bn
 (net debt dated 30 June 2026), 12.8x LTM Jun-26 EV/EBITDA and 11.7x NTM,
 15.9% LTM margin. The revenue chart shows the FY2021–22 trough and recovery;
-the margin chart shows the expansion from 4% to 16% that is the whole Itron
-equity story. Below are the KPIs extracted from narrative text (gross
+the margin chart shows the expansion from 4% to 15% that is the whole Itron
+equity story, with the consensus years shaded as estimates. Under the tiles a
+line says which share count the per-share figures rest on. Below are the KPIs extracted from narrative text (gross
 margin observed 24 times, backlog five times, free cash flow six) with the
 sentence each came from.
 

@@ -427,19 +427,37 @@ async function renderCompany(ticker) {
       api(`/api/companies/${ticker}/charts`),
     ]);
     const metrics = profile.metrics || {};
-    const latest = metrics.latest_actual || {};
+    // Multiples on the valuation basis (LTM when a 10-Q allowed one), labelled,
+    // with the forward multiple beside them: a multiple without its period is
+    // the kind of number an audit sends back.
+    const basis = metrics.valuation_basis || metrics.latest_actual || {};
+    const basisLabel = metrics.basis_label || `FY${basis.fiscal_year || ""}`;
+    const ntm = metrics.ntm || null;
+    const bridge = metrics.ev_bridge || {};
+    const evNote = metrics.enterprise_value == null
+      ? "EV not bridged: net debt unknown"
+      : `EV ${money(metrics.enterprise_value, metrics.currency)}${bridge.balance_sheet_date ? ` · balance sheet ${bridge.balance_sheet_date}` : ""}`;
+    const tiles = [
+      tile("Share price", price(metrics.share_price, metrics.currency), metrics.as_of ? `as of ${metrics.as_of}` : ""),
+      tile("Market cap", money(metrics.market_cap, metrics.currency), evNote),
+      tile(`EV / EBITDA (${basisLabel})`, mult(basis.ev_ebitda), `EV/Revenue ${mult(basis.ev_revenue)} · P/E ${mult(basis.pe)}`),
+      tile("EBITDA margin", pct(basis.ebitda_margin), basisLabel),
+    ];
+    if (ntm && ntm.ev_ebitda != null) {
+      tiles.push(tile("EV / NTM EBITDA", mult(ntm.ev_ebitda),
+        `${ntm.ebitda_derived ? "derived at current margin" : "estimate rows"} · NTM P/E ${mult(ntm.pe)}`));
+    }
+    tiles.push(tile("Corpus tone", `${profile.sentiment >= 0 ? "+" : ""}${profile.sentiment}`, `${profile.document_count} documents`));
+    const shareNote = metrics.shares_basic != null && metrics.shares_diluted !== metrics.shares_basic
+      ? `Per-share figures use the diluted weighted average (${num(metrics.shares_diluted, 2)}m); the cover page shows ${num(metrics.shares_basic, 2)}m.`
+      : `Per-share figures use the cover-page share count (${num(metrics.shares_diluted, 2)}m).`;
     fill(detail,
       el("div", { class: "panel" }, [
         el("h1", {}, `${profile.name} (${profile.ticker})`),
         el("p", { class: "muted small" }, `${profile.industry || ""} · ${profile.hq || ""} · ${num(profile.employees)} employees`),
         el("p", {}, profile.description),
-        el("div", { class: "tiles" }, [
-          tile("Share price", price(metrics.share_price, metrics.currency), metrics.as_of ? `as of ${metrics.as_of}` : ""),
-          tile("Market cap", money(metrics.market_cap, metrics.currency), `EV ${money(metrics.enterprise_value, metrics.currency)}`),
-          tile("EV / EBITDA", mult(latest.ev_ebitda), `EV/Revenue ${mult(latest.ev_revenue)}`),
-          tile("EBITDA margin", pct(latest.ebitda_margin), `FY${latest.fiscal_year || ""}`),
-          tile("Corpus tone", `${profile.sentiment >= 0 ? "+" : ""}${profile.sentiment}`, `${profile.document_count} documents`),
-        ]),
+        el("div", { class: "tiles" }, tiles),
+        el("p", { class: "muted small" }, [shareNote, metrics.debt_note ? ` ${metrics.debt_note}` : ""].join("")),
       ]),
       el("div", { class: "panel-grid" }, [
         el("div", { class: "panel" }, el("div", { class: "chart-slot", html: chartSvg.revenue })),
