@@ -74,6 +74,12 @@ module Sources
       debt_noncurrent: %w[
         LongTermDebtNoncurrent LongTermDebtAndCapitalLeaseObligations
       ],
+      # Borrowings as one line, for filers that tag neither split line.
+      debt_total: %w[
+        LongTermDebt DebtLongtermAndShorttermCombinedAmount DebtAndCapitalLeaseObligations DebtInstrumentCarryingAmount
+      ],
+      minority_interest: %w[MinorityInterest],
+      preferred_equity: %w[PreferredStockValue PreferredStockCarryingAmount],
       assets_current: %w[AssetsCurrent],
       liabilities_current: %w[LiabilitiesCurrent]
     }.freeze
@@ -119,13 +125,25 @@ module Sources
       ended.month == 1 && ended.day <= 15 ? ended.year - 1 : ended.year
     end
 
-    # Annual values by fiscal year for a duration concept (P&L, cash flow).
-    def duration_values(facts, names, unit: "USD")
+    QUARTERLY_FORMS = %w[10-Q 10-Q/A].freeze
+    BALANCE_FORMS = (ANNUAL_FORMS + QUARTERLY_FORMS).freeze
+    # Days in a year-to-date span on a Q1, Q2 or Q3 10-Q.
+    YTD_SPANS = { 1 => (80..100), 2 => (170..190), 3 => (260..280) }.freeze
+
+    # Annual observations by fiscal year for a duration concept, as
+    # {year => {value:, period_end:, filed:, tag:}}.
+    #
+    # Tags are resolved PER YEAR in preference order: an earlier tag's value for
+    # a year wins, a later tag fills the years the earlier ones lack. Resolving
+    # once per company ("first tag with any data") lost every year after a tag
+    # switch and, for Xylem, dropped the whole current-debt line (an audit
+    # finding). Within a tag the most recently filed value wins: restatements.
+    def duration_entries(facts, names, unit: "USD")
       us_gaap = facts.dig(:facts, :"us-gaap") || {}
       out = {}
       names.each do |name|
-        entries = us_gaap.dig(name.to_sym, :units, unit.to_sym) || []
-        entries.each do |entry|
+        per_tag = {}
+        (us_gaap.dig(name.to_sym, :units, unit.to_sym) || []).each do |entry|
           next unless ANNUAL_FORMS.include?(entry[:form]) && entry[:fp] == "FY"
 
           start, finish = entry[:start], entry[:end]
@@ -136,32 +154,107 @@ module Sources
 
           year = fiscal_year(finish)
           filed = entry[:filed].to_s
-          # Later filings restate earlier ones; keep the most recently filed.
-          out[year] = [filed, entry[:val].to_f] if !out.key?(year) || filed > out[year][0]
+          if !per_tag.key?(year) || filed > per_tag[year][:filed]
+            per_tag[year] = { value: entry[:val].to_f, period_end: Date.iso8601(finish), filed: filed, tag: name }
+          end
         end
-        break unless out.empty? # first tag that yields data wins the preference order
+        per_tag.each { |year, row| out[year] ||= row }
       end
-      out.transform_values { |(_, value)| value }
+      out
     end
 
-    # Year-end values for a balance-sheet concept.
-    def instant_values(facts, names)
+    # Annual values by fiscal year for a duration concept (P&L, cash flow).
+    def duration_values(facts, names, unit: "USD")
+      duration_entries(facts, names, unit: unit).transform_values { |row| row[:value] }
+    end
+
+    # Balance-sheet observations by date for an instant concept, from the given
+    # forms, as {Date => {value:, filed:, form:, tag:}}, with the same per-date
+    # tag preference and latest-filed rule.
+    def instant_entries(facts, names, forms: ANNUAL_FORMS, fiscal_year_only: true)
       us_gaap = facts.dig(:facts, :"us-gaap") || {}
       out = {}
       names.each do |name|
+        per_tag = {}
         (us_gaap.dig(name.to_sym, :units, :USD) || []).each do |entry|
-          next unless ANNUAL_FORMS.include?(entry[:form]) && entry[:fp] == "FY"
+          next unless forms.include?(entry[:form])
+          next if fiscal_year_only && entry[:fp] != "FY"
 
           finish = entry[:end]
           next if finish.blank?
 
-          year = fiscal_year(finish)
+          date = Date.iso8601(finish)
           filed = entry[:filed].to_s
-          out[year] = [filed, entry[:val].to_f] if !out.key?(year) || filed > out[year][0]
+          if !per_tag.key?(date) || filed > per_tag[date][:filed]
+            per_tag[date] = { value: entry[:val].to_f, filed: filed, form: entry[:form], tag: name }
+          end
         end
-        break unless out.empty?
+        per_tag.each { |date, row| out[date] ||= row }
       end
-      out.transform_values { |(_, value)| value }
+      out
+    end
+
+    # Year-end values for a balance-sheet concept (fiscal-year 10-K instants).
+    def instant_values(facts, names)
+      dated = {}
+      instant_entries(facts, names).each do |date, row|
+        year = fiscal_year(date)
+        dated[year] = [date, row[:value]] if !dated.key?(year) || date > dated[year][0]
+      end
+      dated.transform_values(&:last)
+    end
+
+    # The most recent balance sheet in the facts, 10-K or 10-Q, every component
+    # read at that one date (in millions). This is what an EV bridge needs: the
+    # reference loader bridged a current price through the last fiscal year
+    # end, which for Itron missed a $600m convertible and a buyback filed since.
+    #
+    # Gross debt is the current plus non-current lines when either is tagged,
+    # else a total-debt tag; when no debt line exists at that date it is taken
+    # as zero WITH `debt_note` saying so, because a filer with no debt tags at
+    # all is usually debt-free but not always. Non-controlling interest and
+    # preferred equity are read for the bridge (zero when absent).
+    def latest_balance_sheet(facts)
+      cash_by_date = instant_entries(facts, INSTANT_TAGS[:cash], forms: BALANCE_FORMS, fiscal_year_only: false)
+      return nil if cash_by_date.empty?
+
+      as_of = cash_by_date.keys.max
+      at = lambda do |key|
+        row = instant_entries(facts, INSTANT_TAGS[key], forms: BALANCE_FORMS, fiscal_year_only: false)[as_of]
+        row && row[:value]
+      end
+      cash = cash_by_date[as_of][:value]
+      short_term_investments = at.call(:short_term_investments) || 0.0
+      debt_current = at.call(:debt_current)
+      debt_noncurrent = at.call(:debt_noncurrent)
+      debt_total = at.call(:debt_total)
+      debt_note = nil
+      gross_debt =
+        if debt_current || debt_noncurrent
+          (debt_current || 0.0) + (debt_noncurrent || 0.0)
+        elsif debt_total
+          debt_total
+        else
+          debt_note = "No debt line tagged at #{as_of.iso8601}; gross debt taken as zero."
+          0.0
+        end
+      minority_interest = at.call(:minority_interest) || 0.0
+      preferred_equity = at.call(:preferred_equity) || 0.0
+      millions = ->(value) { value.nil? ? nil : py_round(value / 1e6, 1) }
+      {
+        as_of: as_of,
+        form: cash_by_date[as_of][:form],
+        cash: millions.call(cash),
+        short_term_investments: millions.call(short_term_investments),
+        debt_current: millions.call(debt_current),
+        debt_noncurrent: millions.call(debt_noncurrent),
+        debt_total: millions.call(debt_total),
+        gross_debt: millions.call(gross_debt),
+        minority_interest: millions.call(minority_interest),
+        preferred_equity: millions.call(preferred_equity),
+        net_debt: millions.call(gross_debt - cash - short_term_investments),
+        debt_note: debt_note
+      }
     end
 
     # Shares outstanding from the most recent filing cover page.
@@ -173,32 +266,55 @@ module Sources
       latest[:val].to_f
     end
 
-    # Diluted and basic share counts, in shares (not millions).
+    # Diluted and basic share counts, in shares (not millions), with `basis`
+    # saying which count `diluted` really is.
     #
     # `diluted` is the latest annual weighted-average diluted count: per-share
     # values in a bridge divide by diluted shares, and the Python loader's use of
     # the cover-page count under a "diluted" label understated them by ~6% for
-    # Itron (43.79m vs 46.32m). `basic` is the cover-page count. Multi-class
-    # filers (Watts Water, for one) report the cover-page count per class as
-    # dimensional facts, which the companyfacts feed omits, so `diluted` falls
-    # back to the cover page. `basic` stays nil without a cover page rather than
-    # borrowing the weighted count: the company page and comps table label which
-    # count they show, and a borrowed one would be labelled wrongly.
+    # Itron (43.79m vs 46.32m). `basic` is the cover-page count. Two guards an
+    # audit of 600 filers showed were needed: the weighted count must belong to
+    # the latest fiscal year on file (a tag a filer stopped using left
+    # LyondellBasell with a count from 2011), and it must be of the cover
+    # count's order of magnitude (McDonald's tags the count in millions, which
+    # read as 716 shares). Either failure falls back to the cover page. Multi-
+    # class filers report the cover-page count per class as dimensional facts,
+    # which the companyfacts feed omits, so `diluted` then stands alone and
+    # `basic` stays nil rather than borrowing it.
     def shares(facts)
       cover = cover_shares(facts)
       cover = nil if cover&.zero?
-      diluted = duration_values(facts, TAGS[:diluted_shares], unit: "shares")
-      weighted = diluted.empty? ? nil : diluted[diluted.keys.max]
-      { diluted: weighted || cover, basic: cover }
+      diluted = duration_entries(facts, TAGS[:diluted_shares], unit: "shares")
+      latest_year = duration_values(facts, TAGS[:revenue]).keys.max
+      year = diluted.keys.max
+      weighted = year && diluted[year][:value]
+      weighted = nil if weighted&.zero?
+      reason = nil
+      if weighted && latest_year && year < latest_year
+        reason = "diluted count is from FY#{year}, revenue runs to FY#{latest_year}"
+        weighted = nil
+      elsif weighted && cover && !(0.5..2.0).cover?(weighted / cover)
+        reason = "diluted count #{weighted.round} is off-scale against the cover page #{cover.round}"
+        weighted = nil
+      end
+      basis =
+        if weighted then "weighted_diluted"
+        elsif cover then "cover_page"
+        else "none"
+        end
+      { diluted: weighted || cover, basic: cover, basis: basis, fallback_reason: reason }
     end
 
-    # Annual income-statement and cash-flow rows, newest `years` fiscal years.
+    # Annual income-statement and cash-flow rows, newest `years` fiscal years,
+    # followed by one trailing-twelve-month row when a 10-Q extends the last
+    # year (see ltm_row).
     #
     # Amounts are converted to millions to match the rest of the application.
     def build_financials(facts, years: 6)
-      series = TAGS.each_with_object({}) do |(key, names), out|
-        out[key] = duration_values(facts, names) unless key == :eps
+      entries = TAGS.each_with_object({}) do |(key, names), out|
+        out[key] = duration_entries(facts, names) unless key == :eps
       end
+      series = entries.transform_values { |rows| rows.transform_values { |row| row[:value] } }
       if series[:dep_amort].empty?
         # Some filers (Badger Meter, for one) never tag a combined line.
         depreciation = duration_values(facts, %w[Depreciation])
@@ -231,6 +347,8 @@ module Sources
 
         rows << {
           fiscal_year: year,
+          period_type: "FY",
+          period_end: entries[:revenue][year][:period_end],
           is_estimate: false,
           revenue: py_round(revenue / 1e6, 1),
           ebitda: ebitda ? py_round(ebitda / 1e6, 1) : nil,
@@ -243,7 +361,96 @@ module Sources
           tax_rate: tax_rate ? py_round(tax_rate, 4) : nil
         }
       end
+      ltm = rows.empty? ? nil : ltm_row(facts, rows.last)
+      rows << ltm if ltm
       rows
+    end
+
+    # Trailing twelve months to the latest 10-Q after the last fiscal year:
+    # fiscal year + current year-to-date − prior-year year-to-date, per flow.
+    # Bankers quote LTM (and NTM) multiples, not last-fiscal-year ones; the
+    # reference loader stored annual rows only, so Itron's multiples sat on a
+    # year that had ended nine months before the pricing date.
+    #
+    # EPS is rolled the same way (an approximation when the share count moved).
+    # D&A falls back to the fiscal-year figure when the quarterlies do not tag
+    # it, since it barely moves within a year. Working capital is not rolled.
+    # Returns nil when no 10-Q extends the last fiscal year or the prior-year
+    # comparable is missing.
+    def ltm_row(facts, fy_row)
+      fy_end = fy_row[:period_end]
+      revenue = latest_ytd(facts, TAGS[:revenue], after: fy_end)
+      return nil if revenue.nil? || revenue[:prior_value].nil?
+
+      quarter_end = revenue[:period_end]
+      ytd = { revenue: revenue }
+      %i[operating_income dep_amort net_income capex].each do |key|
+        ytd[key] = latest_ytd(facts, TAGS[key], after: fy_end, period_end: quarter_end)
+      end
+      ytd[:eps] = latest_ytd(facts, TAGS[:eps], unit: "USD/shares", after: fy_end, period_end: quarter_end)
+
+      roll = lambda do |key, fy_value, scale|
+        y = ytd[key]
+        next nil if y.nil? || y[:prior_value].nil? || fy_value.nil?
+
+        fy_value + (y[:value] - y[:prior_value]) / scale
+      end
+      ltm_revenue = roll.call(:revenue, fy_row[:revenue], 1e6)
+      ebit = roll.call(:operating_income, fy_row[:ebit], 1e6)
+      dep_amort = roll.call(:dep_amort, fy_row[:dep_amort], 1e6) || fy_row[:dep_amort]
+      {
+        fiscal_year: fy_row[:fiscal_year],
+        period_type: "LTM",
+        period_end: quarter_end,
+        is_estimate: false,
+        revenue: py_round(ltm_revenue, 1),
+        ebitda: ebit && dep_amort ? py_round(ebit + dep_amort, 1) : nil,
+        ebit: ebit ? py_round(ebit, 1) : nil,
+        net_income: (v = roll.call(:net_income, fy_row[:net_income], 1e6)) ? py_round(v, 1) : nil,
+        eps: (v = roll.call(:eps, fy_row[:eps], 1.0)) ? py_round(v, 2) : nil,
+        dep_amort: dep_amort ? py_round(dep_amort, 1) : nil,
+        capex: (v = roll.call(:capex, fy_row[:capex], 1e6)) ? py_round(v, 1) : nil,
+        nwc_change: nil,
+        tax_rate: fy_row[:tax_rate]
+      }
+    end
+
+    # The latest year-to-date 10-Q observation of a duration concept ending
+    # after `after` (and exactly on `period_end` when given), with the
+    # prior-year comparable of the same span: {quarter:, period_start:,
+    # period_end:, value:, prior_value:, tag:} or nil. First tag with a
+    # qualifying current period wins.
+    def latest_ytd(facts, names, unit: "USD", after:, period_end: nil)
+      us_gaap = facts.dig(:facts, :"us-gaap") || {}
+      names.each do |name|
+        durations = (us_gaap.dig(name.to_sym, :units, unit.to_sym) || []).select { |e| e[:start].present? && e[:end].present? }
+        current = durations.filter_map do |entry|
+          next unless QUARTERLY_FORMS.include?(entry[:form])
+
+          start = Date.iso8601(entry[:start])
+          finish = Date.iso8601(entry[:end])
+          quarter = YTD_SPANS.find { |_q, span| span.cover?((finish - start).to_i) }&.first
+          next if quarter.nil? || finish <= after
+          next if period_end && finish != period_end
+
+          [entry, start, finish, quarter]
+        end
+        next if current.empty?
+
+        entry, start, finish, quarter = current.max_by { |e, _s, f, _q| [f, e[:filed].to_s] }
+        prior = durations.select do |e|
+          near?(Date.iso8601(e[:end]), finish << 12) && near?(Date.iso8601(e[:start]), start << 12)
+        end.max_by { |e| e[:filed].to_s }
+        return {
+          quarter: quarter, period_start: start, period_end: finish,
+          value: entry[:val].to_f, prior_value: prior && prior[:val].to_f, tag: name
+        }
+      end
+      nil
+    end
+
+    def near?(date, target, days: 10)
+      (date - target).abs <= days
     end
 
     # Current assets less cash, minus current liabilities less debt.
@@ -261,7 +468,9 @@ module Sources
       assets - liabilities
     end
 
-    # Gross debt less cash and short-term investments, in millions.
+    # Gross debt less cash and short-term investments at a fiscal year end, in
+    # millions (the latest_balance_sheet is what the loader stores; this is the
+    # year-end view the financial history and tests use).
     def net_debt(facts, fiscal_year)
       balance = INSTANT_TAGS.transform_values { |names| instant_values(facts, names) }
       debt = balance[:debt_current].fetch(fiscal_year, 0.0) + balance[:debt_noncurrent].fetch(fiscal_year, 0.0)
@@ -392,9 +601,11 @@ module Sources
       name = title_case(submissions[:name].presence || ticker)
 
       financial_rows = build_financials(facts, years: years)
-      latest_year = financial_rows.last&.fetch(:fiscal_year)
+      fiscal_rows = financial_rows.select { |row| row[:period_type] == "FY" }
+      ltm = financial_rows.find { |row| row[:period_type] == "LTM" }
       quote = with_quote ? Market.fetch_quote(ticker) : nil
       share_counts = shares(facts)
+      balance = latest_balance_sheet(facts)
 
       company = nil
       ActiveRecord::Base.transaction do
@@ -422,7 +633,14 @@ module Sources
             share_price: quote[:share_price],
             shares_diluted: py_round(share_counts[:diluted] / 1e6, 2), # millions, as elsewhere
             shares_basic: share_counts[:basic] ? py_round(share_counts[:basic] / 1e6, 2) : nil,
-            net_debt: latest_year ? net_debt(facts, latest_year) : nil,
+            # The latest balance sheet (10-K or 10-Q), dated, with the other
+            # claims the EV bridge deducts — not the last fiscal year end.
+            net_debt: balance && balance[:net_debt],
+            net_debt_as_of: balance && balance[:as_of],
+            balance_sheet_form: balance && balance[:form],
+            minority_interest: balance && balance[:minority_interest],
+            preferred_equity: balance && balance[:preferred_equity],
+            debt_note: balance && balance[:debt_note],
             week52_low: quote[:week52_low],
             week52_high: quote[:week52_high],
             beta: nil
@@ -442,8 +660,11 @@ module Sources
         ticker: ticker.upcase,
         name: name,
         cik: cik,
-        fiscal_years: financial_rows.map { |row| row[:fiscal_year] },
-        latest_revenue: financial_rows.last&.fetch(:revenue),
+        fiscal_years: fiscal_rows.map { |row| row[:fiscal_year] },
+        latest_revenue: fiscal_rows.last&.fetch(:revenue),
+        ltm_period_end: ltm && ltm[:period_end],
+        shares_basis: share_counts[:basis],
+        net_debt_as_of: balance && balance[:as_of],
         share_price: quote ? quote[:share_price] : nil,
         # The quote cache refreshes daily; saying which day the price is from
         # lets a reader tell a fresh load from one served out of the cache.

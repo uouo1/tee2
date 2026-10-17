@@ -38,13 +38,19 @@ module Backtest
     end
 
     # CIK -> ticker from the SEC index. Multi-class filers list several; the
-    # first (the primary listing) is kept.
+    # first-listed is kept, which in the index is the primary common listing
+    # (CMCSA before CCZ, GOOGL before GOOG). An earlier version kept the
+    # shortest ticker and priced Comcast off an exchangeable note and TVA off a
+    # bond; an auditor found eleven members mis-mapped that way.
     def ticker_map(cache: true)
       index = Sources::Http.fetch_json(TICKER_INDEX_URL, cache: cache)
+      rows = index.is_a?(Hash) ? index.keys.sort_by { |key| key.to_s.to_i }.map { |key| index[key] } : Array(index)
       map = {}
-      index.values.sort_by { |row| row[:ticker].to_s.length }.each do |row|
-        cik = row[:cik_str].to_i
-        map[cik] ||= row[:ticker].to_s.upcase
+      rows.each do |row|
+        ticker = row[:ticker].to_s.upcase
+        next if ticker.empty?
+
+        map[row[:cik_str].to_i] ||= ticker
       end
       map
     end
@@ -67,7 +73,11 @@ module Backtest
         anchor_year: anchor_year,
         members: members.count,
         with_ticker: members.where.not(ticker: nil).count,
+        # Not a clean survivorship count: subsidiaries that only issue debt,
+        # predecessor CIKs and registrants whose ticker now maps to a new CIK
+        # (Exxon Mobil) land here with the genuine delistings.
         no_current_ticker: members.where(dropout_reason: "no_current_ticker").count,
+        dropouts: members.where.not(dropout_reason: nil).group(:dropout_reason).count,
         median_revenue_anchor: median(members.pluck(:revenue_anchor).compact)
       }
     end

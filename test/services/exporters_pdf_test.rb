@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "open3"
 require "tmpdir"
 
 # Port of tests/test_api.py::ExportTests (the PDF leg of
@@ -201,9 +202,14 @@ class ExportersPdfTest < ActiveSupport::TestCase
     "#{channels.map { |c| PDF::Core.real(c) }.join(' ')} #{operator}"
   end
 
-  # Prawn emits text as hex strings inside TJ arrays (kerning splits a line
-  # into runs), so decode every text object back to a string for assertions.
+  # Text of the rendered PDF. With the TrueType font Prawn writes glyph ids,
+  # so an independent reader (pdftotext) decodes the text back; without it,
+  # Prawn's Helvetica hex strings are plain Windows-1252 and decode directly.
   def text_of(rendered)
+    if system("which pdftotext > /dev/null 2>&1")
+      out, status = Open3.capture2("pdftotext", "-layout", "-", "-", stdin_data: rendered, binmode: true)
+      return out.force_encoding("UTF-8").gsub(/[ \t]+/, " ").gsub(/ \n/, "\n") if status.success?
+    end
     rendered.scan(/BT\n(.*?)\nET/m).map do |(block)|
       block.scan(/<([0-9a-f]+)>/i).map { |(hex)| [hex].pack("H*") }.join.force_encoding("Windows-1252").encode("UTF-8")
     end.join("\n")
@@ -301,15 +307,23 @@ class ExportersPdfTest < ActiveSupport::TestCase
     assert_includes text, "No evidence pinned yet."
   end
 
-  test "payload text outside Windows-1252 is transliterated rather than raising" do
+  test "payload text outside Windows-1252 is drawn verbatim with the Unicode font, and never raises" do
     slide = SlideFixture.new(kind: "process", title: "Tone → outlook", subtitle: "≥ 3 documents",
-                             payload_hash: { bullets: ["Score of −0.4 on a −1 to +1 scale ✓ 日本"] })
+                             payload_hash: { bullets: ["Score of −0.4 on a −1 to +1 scale ✓ Δ ◾ 日本"] })
     pdf = Exporters::Pdf.build(Deck.new(title: "Unicode", slides: [slide]))
     assert_equal 1, pdf.page_count
-    assert_equal "Score of -0.4 on a -1 to +1 scale ? ??", Exporters::Pdf.clean("Score of −0.4 on a −1 to +1 scale ✓ 日本")
-    assert_equal "Tone -> outlook", Exporters::Pdf.clean("Tone → outlook")
-    # Characters that are in 1252 pass through untouched.
-    assert_equal "— – • “q” · € £ …", Exporters::Pdf.clean("— – • “q” · € £ …")
+    if Exporters::Pdf.unicode_font?
+      # A quoted filing passage stays verbatim: only characters the face lacks become "?".
+      assert_equal "Score of −0.4 on a −1 to +1 scale ✓ Δ ◾ ??", Exporters::Pdf.clean("Score of −0.4 on a −1 to +1 scale ✓ Δ ◾ 日本")
+      assert_equal "Tone → outlook", Exporters::Pdf.clean("Tone → outlook")
+      assert_includes text_of(pdf.render), "−0.4 on a −1 to +1 scale ✓ Δ ◾"
+    else
+      assert_equal "Score of -0.4 on a -1 to +1 scale ? ? ? ??", Exporters::Pdf.clean("Score of −0.4 on a −1 to +1 scale ✓ Δ ◾ 日本")
+    end
+    # The Helvetica fallback path, which systems without the font take.
+    assert_equal "Score of -0.4 on a -1 to +1 scale ? ??", Exporters::Pdf.transliterate("Score of −0.4 on a −1 to +1 scale ✓ 日本")
+    assert_equal "Tone -> outlook", Exporters::Pdf.transliterate("Tone → outlook")
+    assert_equal "— – • “q” · € £ …", Exporters::Pdf.transliterate("— – • “q” · € £ …")
   end
 
   # ---------------------------------------------------- untrusted text

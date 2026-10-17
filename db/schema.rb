@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_10_14_060000) do
+ActiveRecord::Schema[8.1].define(version: 2026_10_17_110000) do
   create_table "backtest_runs", force: :cascade do |t|
     t.string "name", null: false
     t.text "params", default: "{}", null: false
@@ -102,7 +102,9 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_14_060000) do
     t.float "capex"
     t.float "nwc_change"
     t.float "tax_rate"
-    t.index ["company_id", "fiscal_year"], name: "index_financials_on_company_id_and_fiscal_year", unique: true
+    t.string "period_type", default: "FY", null: false
+    t.date "period_end"
+    t.index ["company_id", "fiscal_year", "period_type"], name: "index_financials_on_company_id_and_fiscal_year_and_period_type", unique: true
     t.index ["company_id"], name: "index_financials_on_company_id"
   end
 
@@ -131,6 +133,11 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_14_060000) do
     t.float "week52_low"
     t.float "week52_high"
     t.float "beta"
+    t.date "net_debt_as_of"
+    t.string "balance_sheet_form"
+    t.float "minority_interest"
+    t.float "preferred_equity"
+    t.string "debt_note"
     t.index ["company_id"], name: "index_market_data_on_company_id", unique: true
   end
 
@@ -192,6 +199,14 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_14_060000) do
     t.boolean "is_pinned", default: false
     t.index ["pitchbook_id", "seq"], name: "index_slides_on_pitchbook_id_and_seq"
     t.index ["pitchbook_id"], name: "index_slides_on_pitchbook_id"
+  end
+
+  create_table "split_events", force: :cascade do |t|
+    t.string "ticker", null: false
+    t.date "date", null: false
+    t.float "ratio", null: false
+    t.string "source"
+    t.index ["ticker", "date"], name: "index_split_events_on_ticker_and_date", unique: true
   end
 
   create_table "transactions", force: :cascade do |t|

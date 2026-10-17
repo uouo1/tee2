@@ -492,3 +492,47 @@ class IngestFilesTest < ActiveSupport::TestCase
     assert_equal [Chunk.sole.id], fts_rowids("margin")
   end
 end
+
+# A database built from schema.rb has no FTS table (schema.rb cannot hold a
+# virtual table or triggers). Chunks written before the index existed must be
+# indexed when it is created, and deleting them must not corrupt it.
+class SearchIndexBootstrapTest < ActiveSupport::TestCase
+  self.use_transactional_tests = false
+
+  setup do
+    Document.delete_all
+    @doc = { external_id: "fts-boot-1", title: "Bootstrap", doc_type: "filing", published_at: "2026-01-01",
+             body: "Zebracorn backlog rose sharply this quarter while margins held." }
+  end
+
+  teardown do
+    SearchIndex.ensure!
+    Document.where(external_id: "fts-boot-1").destroy_all
+  end
+
+  def matches(term)
+    ActiveRecord::Base.connection.select_values(
+      "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH #{ActiveRecord::Base.connection.quote(term)}"
+    )
+  end
+
+  test "ensure! indexes chunks that were written while the index did not exist, and deletes stay safe" do
+    SearchIndex.drop!
+    company = Company.create!(ticker: "BOOT", name: "Bootstrap Co")
+    document = Document.create!(external_id: "fts-boot-1", title: "Bootstrap", doc_type: "filing",
+                                published_at: Date.new(2026, 1, 1), body: @doc[:body], company: company)
+    chunk = Chunk.create!(document: document, seq: 0, text: @doc[:body], sentiment: 0.0)
+    SearchIndex.ensure!
+    assert_equal [chunk.id], matches("zebracorn"), "the new index was rebuilt from the chunks table"
+    assert_nothing_raised { document.destroy }
+    assert_empty matches("zebracorn")
+  ensure
+    company&.destroy
+  end
+
+  test "ingest creates the index first when a schema-loaded database lacks it" do
+    SearchIndex.drop!
+    document = Ingest.ingest_document(@doc)
+    assert_equal [document.chunks.first.id], matches("zebracorn")
+  end
+end

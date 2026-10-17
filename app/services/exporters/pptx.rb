@@ -122,8 +122,11 @@ module Exporters
     def number(value, decimals) = fixed(value, decimals, grouping: true)
 
     # f"{value:.{decimals}f}", optionally with thousands separators.
+    # Kernel#format rounds the shortest decimal rendering half-up (29.95 ->
+    # "30.0"); Python's f-string rounds the exact binary value (-> "29.9"), as
+    # Charts.fixed does, so the deck prints the same figure in every format.
     def fixed(value, decimals, grouping: false)
-      text = format("%.#{decimals}f", value.to_f)
+      text = Charts.fixed(value.to_f, decimals: decimals)
       return text unless grouping
 
       integer, fraction = text.split(".", 2)

@@ -42,9 +42,17 @@ Tables: `companies`, `financials`, `market_data` (model `MarketDatum`),
 triggers `chunks_ai/ad/au`), `kpis`, `transactions` (model `Transaction` —
 precedent M&A deals), `watchlists`, `watchlist_items`, `saved_searches`,
 `pitchbooks`, `slides`, `comp_members`, `evidences` (model `Evidence`).
-Columns match the Python schema in `argos/db.py` plus `market_data.shares_basic`.
-Models with associations exist in `app/models/`. `SearchIndex.ensure!` creates
-the FTS objects idempotently (migration, test helper, seeder).
+Columns match the Python schema in `argos/db.py` plus `market_data.shares_basic`
+and, since the October 2026 audit (docs/AUDIT.md, migration
+`20261017110000_add_valuation_bridge_and_ltm.rb`): `financials.period_type`
+(`"FY"` or `"LTM"`), `financials.period_end`, and on `market_data`
+`net_debt_as_of`, `balance_sheet_form`, `minority_interest`,
+`preferred_equity`, `debt_note`. The unique key on financials is
+(company_id, fiscal_year, period_type); an LTM row shares its fiscal_year with
+the last reported year it extends. Models with associations exist in
+`app/models/`. `SearchIndex.ensure!` creates the FTS objects idempotently and
+rebuilds the index when it is new or out of step with `chunks` (migration,
+test helper, seeder, and `Ingest` before the first write).
 
 One deliberate change from Python: `market_data.shares_diluted` must hold the
 **diluted weighted-average** share count (us-gaap
@@ -140,22 +148,42 @@ Analytics.check_alerts(mark_seen: false) -> [{saved_search_id:, name:, query:, n
 Valuation::MULTIPLES, Valuation::MULTIPLE_LABELS
 Valuation.percentile(values, pct) -> Float | nil   # linear interpolation
 Valuation.describe(values) -> {count:, min:, p25:, median:, p75:, max:, mean:}
-Valuation.company_metrics(ticker, forward_years: 2) -> Hash | nil   # latest_actual multiples, forward, financials, EV bridge
-Valuation.comps_table(tickers, exclude: nil) -> {rows:, stats:, labels:}
+Valuation.company_metrics(ticker, forward_years: 2) -> Hash | nil   # latest_actual (last FY), ltm (or nil), valuation_basis (LTM when present, else FY),
+                                                                     # basis_label ("LTM Jun-26" / "FY2025"), ev_bridge, net_debt_as_of, other_claims, forward, financials
+Valuation.comps_table(tickers, exclude: nil) -> {rows:, stats:, labels:, bases:}   # rows carry basis, price_date, net_debt_as_of, other_claims
 Valuation.precedent_transactions(sector: nil) -> {rows:, stats:}
-Valuation.implied_from_multiple(low, high, metric_value:, kind:, net_debt:, shares:) -> Hash | nil
-Valuation::DcfAssumptions   # Data/Struct with keyword init and the Python defaults;
-                            # .coerce(hash) drops unknown/blank keys and casts; #with_overrides(hash); #to_h
-Valuation.run_dcf(assumptions) -> Hash           # projections, pv_explicit, terminal_value, pv_terminal, terminal_method,
-                                                 # terminal_share_of_ev, enterprise_value, net_debt, equity_value, value_per_share, implied_ev_ebitda
-                                                 # raises ArgumentError: wacc <= 0, base_revenue <= 0, terminal_growth >= wacc (growth method)
+Valuation.implied_from_multiple(low, high, metric_value:, kind:, net_debt:, shares:, other_claims: 0.0) -> Hash | nil
+Valuation.wacc_build(metrics, risk_free_rate:, equity_risk_premium:, debt_spread:, beta:, tax_rate:) -> Hash   # CAPM build with inputs, weights, notes
+Valuation::DcfAssumptions   # Data with keyword init; .coerce(hash) drops unknown/blank keys and casts; #with_overrides(hash); #to_h
+                            # fields: base_revenue, revenue_growth (year 1), ebitda_margin, margin_expansion, da_pct_revenue, capex_pct_revenue,
+                            # nwc_pct_revenue (per unit of revenue CHANGE), tax_rate, wacc, terminal_growth, exit_multiple, years, net_debt (nil = unknown),
+                            # other_claims, shares_diluted (nil = unknown), mid_year_convention, terminal_capex_floor, stub_fraction, start_year, valuation_date
+Valuation.run_dcf(assumptions) -> Hash           # projections (with fcf_full_year, period_fraction, discount_period), terminal_year, pv_explicit, terminal_value,
+                                                 # pv_terminal, terminal_method, terminal_discount_period, terminal_share_of_ev, implied_exit_multiple,
+                                                 # implied_terminal_growth, enterprise_value, net_debt, other_claims, equity_value, value_per_share, bridge_note, implied_ev_ebitda
+                                                 # raises ArgumentError: wacc <= 0, base_revenue <= 0, years < 1, stub_fraction outside (0, 1], terminal_growth >= wacc (growth method)
 Valuation.dcf_sensitivity(assumptions, wacc_steps: nil, terminal_steps: nil) -> {wacc_axis:, terminal_axis:, grid:, min:, max:}
-Valuation.football_field(target_ticker, comp_tickers, assumptions: nil) -> Hash   # target, ranges, axis, reference_price, comps, precedents, dcf, sensitivity, concluded_range
-Valuation.default_assumptions(metrics) -> DcfAssumptions   # 3-year NWC average clamped [-3%, 5%], tax clamped [15%, 35%]
+Valuation.football_field(target_ticker, comp_tickers, assumptions: nil) -> Hash   # target, ranges (each with in_conclusion, reference, note), axis, reference_price,
+                                                                                   # comps, precedents, wacc, dcf, dcf_note, sensitivity, concluded_range {low, high, methods}
+Valuation.default_assumptions(metrics, wacc: nil) -> DcfAssumptions   # growth from the last two FYs; margin/D&A/capex from the LTM row when present;
+                                                                      # 3-year NWC average clamped [-3%, 5%]; WACC from wacc_build; stub from the price date
 ```
-Football-field DCF band is WACC ±100bps × terminal ±50bps (the displayed
-sensitivity grid is ±150/±100); concluded range = median low / median high.
-Omit the precedent bar when no transactions exist (never fabricate).
+DCF mechanics (each a corrected audit finding; see docs/AUDIT.md): growth
+interpolates linearly from year 1 to the terminal rate; ΔNWC = intensity ×
+change in revenue; year 1 counts only its `stub_fraction` and every flow is
+discounted from the valuation date; the terminal year is built explicitly with
+capex floored at D&A; a Gordon terminal value sits at N − ½ under the mid-year
+convention, an exit-multiple value at N; unknown net debt gives an enterprise
+value and no per-share figure. Football-field DCF band is WACC ±100bps ×
+terminal ±50bps (the displayed sensitivity grid is ±150/±100). The concluded
+range is the median low / median high of the bars with `in_conclusion`: the
+52-week range is a reference bar only, and the EV/Revenue bar is excluded
+when the target's EBITDA margin lies outside the peers' interquartile range.
+EV = market cap + net debt + minority interest + preferred equity, with the
+balance-sheet date and form reported beside it. Multiples are quoted on the
+LTM row when the loader built one, else the last fiscal year, and every page
+must print `basis_label` next to them. Omit the precedent bar when no
+transactions exist (never fabricate).
 
 ### `Charts` (`app/services/charts.rb`) — port of `argos/charts.py`
 
@@ -225,9 +253,14 @@ Sources::Http.fetch_json(url, **opts) -> Hash
 Sources::HtmlText.html_to_text(markup, max_chars: nil) -> String   # drop script/style/hidden ix, zero-width chars, page numbers, TOC rows, "Table of Contents" prefixes; rejoin wrapped lines
 Sources::Market.fetch_quote(ticker, cache: true) -> Hash | nil      # share_price, currency, week52_low/high, as_of, exchange
 Sources::Sec.resolve_cik(ticker), .fetch_submissions(cik), .fetch_facts(cik)
-Sources::Sec.build_financials(facts, years: 6) -> [Hash]            # same tag preference order; early-January year ends -> prior FY; D&A fallback; operating NWC excludes cash & debt
-Sources::Sec.net_debt(facts, fiscal_year) -> Float | nil
-Sources::Sec.shares(facts) -> {diluted:, basic:}                    # see schema note above
+Sources::Sec.build_financials(facts, years: 6) -> [Hash]            # FY rows (period_type "FY", period_end) then one LTM row when a 10-Q extends the last year;
+                                                                     # tags resolved PER YEAR in preference order; early-January year ends -> prior FY; D&A fallback; operating NWC excludes cash & debt
+Sources::Sec.duration_entries(facts, names, unit:) -> {year => {value:, period_end:, filed:, tag:}}
+Sources::Sec.instant_entries(facts, names, forms:, fiscal_year_only:) -> {Date => {value:, filed:, form:, tag:}}
+Sources::Sec.latest_balance_sheet(facts) -> Hash | nil             # newest 10-K/10-Q balance sheet at one date: cash, debt lines, gross_debt, net_debt, minority_interest, preferred_equity, debt_note
+Sources::Sec.ltm_row(facts, fy_row) -> Hash | nil                   # FY + YTD − prior YTD per flow; D&A falls back to the FY figure
+Sources::Sec.net_debt(facts, fiscal_year) -> Float | nil            # the fiscal-year-end view
+Sources::Sec.shares(facts) -> {diluted:, basic:, basis:, fallback_reason:}   # weighted diluted only if from the latest FY and within 0.5–2x of the cover count
 Sources::Sec.collect_documents(cik, submissions, annual: 1, quarterly: 2, press_releases: 4) -> [Hash]   # EX-99.1 by normalised name
 Sources::Sec.load_company(ticker, sector: nil, years: 6, annual: 1, quarterly: 2, press_releases: 4, with_documents: true, with_quote: true) -> Hash
 Sources::Sec.load_companies(tickers, **opts) -> {loaded:, failures:, companies:, documents_added:}
@@ -307,11 +340,14 @@ a regression test for it; porting the Python behaviour verbatim is wrong here.
    over *all* matching chunks (`GROUP BY document_id`, `MIN(bm25)`), weights
    and sorts in Ruby, counts the true total, then paginates. Sentiment facet and
    sentiment filter must both be document-level (`documents.sentiment`).
-6. **KPI extraction needs sanity bounds.** Reject headcount values that look like
-   years (1900–2100) or that are below 10; reject any margin/retention/growth
-   value above 100% (or below −100%); reject negative headcount/ARR/backlog.
-   Real filings produced `headcount = 2004` (from "2004 Stock Incentive Plan")
-   and `ebitda_margin = 120`.
+6. **KPI extraction needs sanity bounds and signs.** Reject headcount values
+   that look like years (1900–2100) or that are below 10; reject margins
+   outside ±100%, churn and capex intensity outside 0–100%, net retention above
+   300% and growth above 1,000% (retention and growth above 100% are real);
+   reject negative headcount/ARR/backlog but keep a negative free cash flow or
+   margin WITH its sign (the reference stored "-$12 million" as +12). Real
+   filings produced `headcount = 2004` (from "2004 Stock Incentive Plan") and
+   `ebitda_margin = 120`.
 7. **Hardcoded analysis in slides.** Replace fixed-threshold prose with
    data-driven comparisons: profitability vs the *peer median* margin
    (above/in line/below with the numbers); leverage phrased from net debt /
@@ -329,3 +365,52 @@ a regression test for it; porting the Python behaviour verbatim is wrong here.
 10. **Test isolation.** Exports written during tests go to `tmp/` (set
     `Exporters.export_dir` from an env/config value, `Rails.root/tmp/exports`
     in test), never into `data/exports`.
+
+## Findings of the October 2026 audit — binding on the modules still to port
+
+An investment-analyst review and two engineering audits (docs/AUDIT.md) added
+the following. Items 11–15 are fixed in the ported services and must not be
+undone; items 16–22 bind `Pitchbooks`, the deck views, `Search`, `Analytics`,
+the API and the web UI.
+
+11. **EV bridge.** Net debt comes from the latest balance sheet (10-K or 10-Q)
+    with its date and form stored; non-controlling interest and preferred
+    equity are deducted; a filer with no debt line is bridged at zero debt with
+    `debt_note` set. Tags resolve per year/date, never once per company.
+12. **LTM.** `build_financials` adds a trailing-twelve-month row from the latest
+    10-Q; `Valuation` quotes multiples on it when present and labels the basis.
+13. **DCF mechanics** as listed under `Valuation` above: ΔNWC on revenue
+    change, linear growth path, stub period, terminal year with a capex floor,
+    exit multiple at N, built-up WACC, no bridge through unknown net debt.
+14. **Football field.** The 52-week range never enters the concluded range; an
+    EV/Revenue bar on a margin outlier is shown but excluded with a note.
+15. **Share-count guards.** A weighted diluted count is used only when it is
+    from the latest fiscal year and within 0.5–2× of the cover count.
+16. **No "upside" language.** Comps bars are "implied value at peer multiples",
+    never upside or a price target; the executive summary and process slides
+    state the implied range against the price without calling it a move. The
+    repository's own backtest found no evidence that cheap-versus-peers predicts
+    returns, and the deck must not imply otherwise.
+17. **Every multiple names its period and date.** Comps and valuation pages
+    print `basis_label` (LTM Jun-26 / FY2025), the price date, the
+    balance-sheet date, the share-count basis (`shares_basic` vs
+    `shares_diluted`) and an EBITDA-definition footnote (GAAP operating income
+    plus D&A, no adjustments).
+18. **DCF slide.** Shows the WACC build (`wacc_build` inputs and notes, including
+    "beta not loaded" when assumed), the stub fraction and valuation date, a
+    projections table with D&A and ΔNWC so UFCF ties, the terminal-year row,
+    and the implied exit multiple / implied growth cross-checks.
+19. **Prose is data-driven.** Profitability compares the target's margin with the
+    peer median (with both numbers); leverage comes from net debt / EBITDA
+    bands; no fixed adjectives ("modest"), no SaaS diligence bullet, no
+    counterparty rationale that calls every peer "accretive"; themes used in
+    prose must pass the boilerplate stoplist and may not emit tokens such as
+    "n/a".
+20. **KPI tiles** carry a period and, when the sentence is a segment or table
+    row, are not shown as company-level; the company page labels adjusted vs
+    GAAP where the sentence says so.
+21. **Search** reports document-level totals that agree with the facets, accepts
+    several values per field filter (`ticker:ITRI ticker:BMI`) and a `date:`
+    filter.
+22. **Decks are stamped** with the data as-of date, the price date and the code
+    version, and the UI warns when the data is newer than the slides.

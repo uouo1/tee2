@@ -119,20 +119,23 @@ module Nlp
     "backlog" => ["rpo", "remaining performance obligations", "order book"]
   }.transform_values(&:freeze).freeze
 
-  # [metric, pattern, unit]. Patterns are ASCII-digit because Float() is.
+  # [metric, pattern, unit]. Patterns are ASCII-digit because Float() is. The
+  # number group admits a leading "-", "−" or "negative " so a cash outflow or
+  # a negative margin keeps its sign (the reference stored "-$12 million" as
+  # +12, which an audit of the KPI series caught).
   KPI_PATTERNS = [
-    ["revenue_growth", /revenue[[:space:]]+(?:grew|increased|rose|was up|up)[[:space:]]+(?:by[[:space:]]+)?(\d+(?:\.\d+)?)[[:space:]]?%/i, "%"],
-    ["revenue_decline", /revenue[[:space:]]+(?:fell|declined|decreased|was down|down)[[:space:]]+(?:by[[:space:]]+)?(\d+(?:\.\d+)?)[[:space:]]?%/i, "%"],
-    ["gross_margin", /gross margin\D{0,24}?(\d+(?:\.\d+)?)[[:space:]]?%/i, "%"],
-    ["ebitda_margin", /(?:adjusted[[:space:]]+)?ebitda margin\D{0,24}?(\d+(?:\.\d+)?)[[:space:]]?%/i, "%"],
-    ["operating_margin", /operating margin\D{0,24}?(\d+(?:\.\d+)?)[[:space:]]?%/i, "%"],
-    ["net_retention", /(?:net (?:dollar )?retention|ndr)\D{0,24}?(\d+(?:\.\d+)?)[[:space:]]?%/i, "%"],
-    ["churn", /churn\D{0,24}?(\d+(?:\.\d+)?)[[:space:]]?%/i, "%"],
-    ["arr", /(?:arr|annual recurring revenue)\D{0,24}?\$?(\d+(?:\.\d+)?)[[:space:]]?(?:million|m|billion|bn|b)\b/i, "currency"],
-    ["backlog", /(?:backlog|rpo|remaining performance obligations)\D{0,24}?\$?(\d+(?:\.\d+)?)[[:space:]]?(?:million|m|billion|bn|b)\b/i, "currency"],
+    ["revenue_growth", /revenue[[:space:]]+(?:grew|increased|rose|was up|up)[[:space:]]+(?:by[[:space:]]+)?((?:-|−|negative[[:space:]]+)?\d+(?:\.\d+)?)[[:space:]]?%/i, "%"],
+    ["revenue_decline", /revenue[[:space:]]+(?:fell|declined|decreased|was down|down)[[:space:]]+(?:by[[:space:]]+)?((?:-|−|negative[[:space:]]+)?\d+(?:\.\d+)?)[[:space:]]?%/i, "%"],
+    ["gross_margin", /gross margin\D{0,24}?((?:-|−|negative[[:space:]]+)?\d+(?:\.\d+)?)[[:space:]]?%/i, "%"],
+    ["ebitda_margin", /(?:adjusted[[:space:]]+)?ebitda margin\D{0,24}?((?:-|−|negative[[:space:]]+)?\d+(?:\.\d+)?)[[:space:]]?%/i, "%"],
+    ["operating_margin", /operating margin\D{0,24}?((?:-|−|negative[[:space:]]+)?\d+(?:\.\d+)?)[[:space:]]?%/i, "%"],
+    ["net_retention", /(?:net (?:dollar )?retention|ndr)\D{0,24}?((?:-|−|negative[[:space:]]+)?\d+(?:\.\d+)?)[[:space:]]?%/i, "%"],
+    ["churn", /churn\D{0,24}?((?:-|−|negative[[:space:]]+)?\d+(?:\.\d+)?)[[:space:]]?%/i, "%"],
+    ["arr", /(?:arr|annual recurring revenue)\D{0,24}?\$?((?:-|−|negative[[:space:]]+)?\d+(?:\.\d+)?)[[:space:]]?(?:million|m|billion|bn|b)\b/i, "currency"],
+    ["backlog", /(?:backlog|rpo|remaining performance obligations)\D{0,24}?\$?((?:-|−|negative[[:space:]]+)?\d+(?:\.\d+)?)[[:space:]]?(?:million|m|billion|bn|b)\b/i, "currency"],
     ["headcount", /(?:headcount|employees)\D{0,24}?([\d,]{3,})\b/i, "count"],
-    ["free_cash_flow", /free cash flow\D{0,24}?\$?(\d+(?:\.\d+)?)[[:space:]]?(?:million|m|billion|bn|b)\b/i, "currency"],
-    ["capex_intensity", /capex\D{0,24}?(\d+(?:\.\d+)?)[[:space:]]?%[[:space:]]+of revenue/i, "%"]
+    ["free_cash_flow", /free cash flow\D{0,24}?\$?((?:-|−|negative[[:space:]]+)?\d+(?:\.\d+)?)[[:space:]]?(?:million|m|billion|bn|b)\b/i, "currency"],
+    ["capex_intensity", /capex\D{0,24}?((?:-|−|negative[[:space:]]+)?\d+(?:\.\d+)?)[[:space:]]?%[[:space:]]+of revenue/i, "%"]
   ].map(&:freeze).freeze
   BILLIONS_RE = /billion|bn\b|\bb\b/i
 
@@ -334,11 +337,16 @@ module Nlp
       KPI_PATTERNS.each do |metric, pattern, unit|
         sentence.to_enum(:scan, pattern).map { Regexp.last_match }.each do |match|
           raw = match[1].delete(",")
+          # "-$12 million" puts the sign before the currency symbol, outside the
+          # number group; look at the three characters ahead of the number too.
+          ahead = sentence[[match.begin(1) - 3, 0].max...match.begin(1)].to_s
+          negative = raw.match?(/\A(?:-|−|negative)/i) || ahead.match?(/[-−][[:space:]]?\$?\z/)
           value = begin
-            Float(raw)
+            Float(raw.sub(/\A(?:-|−|negative[[:space:]]+)/i, ""))
           rescue ArgumentError
             next
           end
+          value = -value if negative
           value *= 1000.0 if unit == "currency" && match[0].match?(BILLIONS_RE) # normalise to millions
           next unless kpi_value_plausible?(metric, unit, value, match[1])
 
@@ -364,12 +372,15 @@ module Nlp
     "revenue_growth" => (0.0..1000.0), "revenue_decline" => (0.0..100.0)
   }.freeze
 
+  # Amounts that can legitimately be negative: a cash outflow is still a fact.
+  SIGNED_CURRENCY = %w[free_cash_flow].freeze
+
   def kpi_value_plausible?(metric, unit, value, raw)
     case unit
     when "%" then KPI_BOUNDS.fetch(metric, (-100.0..100.0)).cover?(value)
     # A four-digit count with no thousands separator that reads as a year is a year.
     when "count" then value >= 10 && !(raw.exclude?(",") && value.between?(1900, 2100))
-    else value >= 0
+    else SIGNED_CURRENCY.include?(metric) || value >= 0
     end
   end
 

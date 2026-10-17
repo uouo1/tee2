@@ -10,32 +10,36 @@ module Valuation
   # Defaults so a *partial* override hash (what the UI and API send) can be
   # coerced without having to restate the whole model; `run_dcf` validates.
   class DcfAssumptions < Data.define(
-    :base_revenue, :revenue_growth, :growth_fade, :ebitda_margin, :margin_expansion,
+    :base_revenue, :revenue_growth, :ebitda_margin, :margin_expansion,
     :da_pct_revenue, :capex_pct_revenue, :nwc_pct_revenue, :tax_rate, :wacc,
-    :terminal_growth, :exit_multiple, :years, :net_debt, :shares_diluted,
-    :mid_year_convention, :start_year
+    :terminal_growth, :exit_multiple, :years, :net_debt, :other_claims, :shares_diluted,
+    :mid_year_convention, :terminal_capex_floor, :stub_fraction, :start_year, :valuation_date
   )
     INTEGER_FIELDS = %i[years start_year].freeze
-    BOOLEAN_FIELDS = %i[mid_year_convention].freeze
+    BOOLEAN_FIELDS = %i[mid_year_convention terminal_capex_floor].freeze
+    DATE_FIELDS = %i[valuation_date].freeze
 
     def initialize(
       base_revenue: 0.0,
-      revenue_growth: 0.12,
-      growth_fade: 0.15,          # fraction of growth given back each year
+      revenue_growth: 0.12,         # year-1 growth; later years interpolate linearly to terminal_growth
       ebitda_margin: 0.25,
-      margin_expansion: 0.004,    # annual change in EBITDA margin
+      margin_expansion: 0.004,      # annual change in EBITDA margin over the explicit years
       da_pct_revenue: 0.05,
       capex_pct_revenue: 0.04,
-      nwc_pct_revenue: 0.012,     # change in net working capital
+      nwc_pct_revenue: 0.012,       # working-capital investment per unit of revenue CHANGE
       tax_rate: Valuation::DEFAULT_TAX_RATE,
       wacc: Valuation::DEFAULT_WACC,
       terminal_growth: Valuation::DEFAULT_TERMINAL_GROWTH,
-      exit_multiple: nil,         # when set, terminal value = exit_multiple x terminal EBITDA
+      exit_multiple: nil,           # when set, terminal value = exit_multiple x final-year EBITDA
       years: Valuation::PROJECTION_YEARS,
-      net_debt: 0.0,
+      net_debt: 0.0,                # nil = unknown: enterprise value only, no equity bridge
+      other_claims: 0.0,            # non-controlling interest + preferred equity, deducted with net debt
       shares_diluted: 1.0,
       mid_year_convention: true,
-      start_year: 2027
+      terminal_capex_floor: true,   # terminal-year capex at least equal to D&A
+      stub_fraction: 1.0,           # share of the first projected year still ahead at the valuation date
+      start_year: 2027,
+      valuation_date: nil
     )
       super
     end
@@ -60,6 +64,8 @@ module Valuation
             # Form params arrive as strings; "false" and "0" must mean false
             # (Python's bool() would have read any non-empty string as true).
             ActiveModel::Type::Boolean.new.cast(value)
+          elsif DATE_FIELDS.include?(key)
+            value.is_a?(Date) ? value : Date.iso8601(value.to_s)
           else
             Float(value)
           end

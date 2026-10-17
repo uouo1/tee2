@@ -152,3 +152,140 @@ class BacktestStatsTest < ActiveSupport::TestCase
     assert_in_delta 15.0, means.last, 1e-9
   end
 end
+
+# A cross-section small enough to compute by hand. Every expected value below
+# was worked out on paper from the fixture, so the assertions are exact and
+# a timing error (a backward window, an off-by-one month, a price or filing
+# read from the future) changes them.
+class BacktestHandComputedTest < ActiveSupport::TestCase
+  self.use_transactional_tests = false
+
+  ANCHOR = 2016
+  T = Date.new(2017, 2, 28)
+  NAMES = { 9101 => "HA", 9102 => "HB", 9103 => "HC", 9104 => "HD", 9105 => "HE" }.freeze
+  # Yahoo-style stored closes at T. HE has a 2:1 split on 2017-04-15, so its
+  # stored closes before that date are half the raw price.
+  CLOSES_AT_T = { "HA" => 50.0, "HB" => 100.0, "HC" => 150.0, "HD" => 200.0, "HE" => 12.5 }.freeze
+  # adj_close by month for the five names, in the order HA HB HC HD HE. 1.0
+  # wherever a month is not listed. Chosen so that only the correct forward
+  # window ranks like the signal (HE > HA > HB > HC > HD):
+  #   t-3 (backward window) and t+2 / t+4 (off-by-one) rank the other way.
+  ADJ = {
+    Date.new(2016, 11, 30) => [1.3, 1.2, 1.1, 1.0, 1.4],
+    Date.new(2017, 4, 30) => [1.0, 1.1, 1.2, 1.3, 0.9],
+    Date.new(2017, 5, 31) => [1.4, 1.3, 1.2, 1.1, 1.5],  # t+3
+    Date.new(2017, 6, 30) => [1.1, 1.2, 1.3, 1.4, 1.0],
+    Date.new(2017, 8, 31) => [1.8, 1.6, 1.4, 1.2, 2.0],  # t+6
+    Date.new(2018, 2, 28) => [2.0, 1.5, 1.2, 1.1, 2.5]   # t+12
+  }.freeze
+
+  setup do
+    teardown_data
+    NAMES.each_with_index do |(cik, ticker), i|
+      UniverseMember.create!(cik: cik, ticker: ticker, name: ticker, sic: "3500", anchor_year: ANCHOR, has_prices: true)
+      base = { cik: cik, ticker: ticker, fiscal_year: 2016, filed: Date.new(2017, 2, 20), form: "10-K" }
+      PitFact.create!(base.merge(concept: "operating_income", period_start: Date.new(2016, 1, 1), period_end: Date.new(2016, 12, 31), value: 80.0))
+      PitFact.create!(base.merge(concept: "dep_amort", period_start: Date.new(2016, 1, 1), period_end: Date.new(2016, 12, 31), value: 20.0))
+      PitFact.create!(base.merge(concept: "cash", period_end: Date.new(2016, 12, 31), value: 50.0))
+      PitFact.create!(base.merge(concept: "debt_noncurrent", period_end: Date.new(2016, 12, 31), value: 50.0))
+      PitFact.create!(base.merge(concept: "shares_cover", period_end: Date.new(2017, 2, 10), value: 10.0))
+      month = Date.new(2016, 11, 30)
+      while month <= Date.new(2018, 2, 28)
+        close = if month == T then CLOSES_AT_T[ticker]
+                elsif month == Date.new(2017, 3, 31) then [200.0, 150.0, 100.0, 50.0, 12.5][i] # reversed: a signal read from t+1 ranks the other way
+                elsif ticker == "HE" then month < Date.new(2017, 4, 30) ? 12.5 : 30.0
+                else 100.0
+                end
+        PriceBar.create!(ticker: ticker, month_end: month, close: close, adj_close: ADJ.fetch(month, [1.0] * 5)[i], source: "synthetic")
+        month = Date.new((month >> 1).year, (month >> 1).month, -1)
+      end
+    end
+    # HA restates FY2016 operating income on T itself: public after the close, so not usable at T.
+    PitFact.create!(cik: 9101, ticker: "HA", concept: "operating_income", fiscal_year: 2016, filed: T, form: "10-K/A",
+                    period_start: Date.new(2016, 1, 1), period_end: Date.new(2016, 12, 31), value: 180.0)
+    SplitEvent.create!(ticker: "HE", date: Date.new(2017, 4, 15), ratio: 2.0)
+  end
+
+  teardown { teardown_data }
+
+  def teardown_data
+    UniverseMember.where(cik: 9101..9110).delete_all
+    PitFact.where(cik: 9101..9110).delete_all
+    PriceBar.where(ticker: NAMES.values + %w[HF HG HH]).delete_all
+    SplitEvent.where(ticker: NAMES.values).delete_all
+    BacktestRun.where(name: "hand").delete_all
+  end
+
+  def by_ticker(rows) = rows.to_h { |r| [r.ticker, r] }
+
+  test "multiples and signals at T are exactly the hand-computed values" do
+    rows = by_ticker(Backtest::Runner.cross_section(Backtest::Runner.load(ANCHOR), T))
+    # EBITDA 100, net debt 0, shares 10: multiple = close / 10. HE's stored 12.5 is a
+    # post-split price for a pre-split date, so the raw close is 25 and the multiple 2.5.
+    assert_equal({ "HA" => 5.0, "HB" => 10.0, "HC" => 15.0, "HD" => 20.0, "HE" => 2.5 }, rows.transform_values(&:multiple))
+    assert_equal 25.0, rows["HE"].close
+    assert_equal 10.0, rows["HE"].shares, "the split is after T, so the cover count is not rolled forward"
+    # Leave-one-out medians: HE 12.5, HA 12.5, HB 10, HC 7.5, HD 7.5.
+    expected = { "HE" => Math.log(5.0), "HA" => Math.log(2.5), "HB" => 0.0, "HC" => Math.log(0.5), "HD" => Math.log(0.375) }
+    expected.each { |ticker, signal| assert_in_delta signal, rows[ticker].signal, 1e-12, ticker }
+    assert_equal 100.0, rows["HA"].ebitda, "the restatement filed on T is not public at T's close"
+  end
+
+  test "a filing dated T is used from the next month-end" do
+    data = Backtest::Runner.load(ANCHOR)
+    assert_equal 200.0, by_ticker(Backtest::Runner.cross_section(data, Date.new(2017, 3, 31)))["HA"].ebitda
+  end
+
+  test "the forward return is measured from T to exactly T plus the horizon on adjusted closes" do
+    results = Backtest::Runner.run!(name: "hand", anchor_year: ANCHOR, min_names: 3, persist: false)
+    assert_equal [T.iso8601], results[:coverage].select { |c| c[:names_with_signal].positive? }.map { |c| c[:date] }
+    [3, 6, 12].each do |h|
+      r = results[:horizons][h]
+      assert_equal 1, r[:n_dates], "horizon #{h}"
+      assert_equal 1.0, r[:mean_ic], "horizon #{h}: only the true forward window ranks like the signal"
+      assert_equal 5.0, r[:avg_names]
+      assert_equal 1.0, r[:hit_rate]
+    end
+    # 12m quintiles with five names are one name each: Q1 = HE (2.5 - 1 = 150%), Q5 = HD (10%).
+    assert_in_delta 1.5, results[:horizons][12][:mean_q1_return], 1e-9
+    assert_in_delta 0.1, results[:horizons][12][:mean_q5_return], 1e-9
+    assert_in_delta 1.4, results[:horizons][12][:mean_spread], 1e-9
+  end
+
+  test "splits: the month of the split is skipped, then the cover count is rolled forward" do
+    data = Backtest::Runner.load(ANCHOR)
+    assert_nil by_ticker(Backtest::Runner.cross_section(data, Date.new(2017, 4, 30)))["HE"], "Yahoo's bar straddles the split"
+    after = by_ticker(Backtest::Runner.cross_section(data, Date.new(2017, 5, 31)))["HE"]
+    assert_equal 30.0, after.close, "no later split, so the stored close is the raw close"
+    assert_equal 20.0, after.shares, "10 cover-page shares filed 20 Feb, doubled by the 15 April split"
+    assert_in_delta 6.0, after.multiple, 1e-12 # 30 x 20 / 100
+  end
+
+  test "a name with a zero cover count, or cash but no debt line, is excluded; a total-debt tag is enough" do
+    extra = { 9106 => "HF", 9107 => "HG", 9108 => "HH" }
+    extra.each do |cik, ticker|
+      UniverseMember.create!(cik: cik, ticker: ticker, name: ticker, sic: "3500", anchor_year: ANCHOR, has_prices: true)
+      base = { cik: cik, ticker: ticker, fiscal_year: 2016, filed: Date.new(2017, 2, 20), form: "10-K" }
+      PitFact.create!(base.merge(concept: "operating_income", period_start: Date.new(2016, 1, 1), period_end: Date.new(2016, 12, 31), value: 80.0))
+      PitFact.create!(base.merge(concept: "dep_amort", period_start: Date.new(2016, 1, 1), period_end: Date.new(2016, 12, 31), value: 20.0))
+      PitFact.create!(base.merge(concept: "cash", period_end: Date.new(2016, 12, 31), value: 50.0))
+      PitFact.create!(base.merge(concept: "shares_cover", period_end: Date.new(2017, 2, 10), value: ticker == "HF" ? 0.0 : 10.0))
+      PriceBar.create!(ticker: ticker, month_end: T, close: 100.0, adj_close: 1.0, source: "synthetic")
+    end
+    PitFact.create!(cik: 9106, ticker: "HF", concept: "debt_noncurrent", fiscal_year: 2016, filed: Date.new(2017, 2, 20), form: "10-K", period_end: Date.new(2016, 12, 31), value: 50.0)
+    PitFact.create!(cik: 9108, ticker: "HH", concept: "debt_total", fiscal_year: 2016, filed: Date.new(2017, 2, 20), form: "10-K", period_end: Date.new(2016, 12, 31), value: 250.0)
+
+    counters = Hash.new(0)
+    rows = by_ticker(Backtest::Runner.cross_section(Backtest::Runner.load(ANCHOR), T, counters: counters))
+    assert_nil rows["HF"], "zero shares: a bond or preferred ticker"
+    assert_nil rows["HG"], "cash known, no debt line: unknown, not debt-free"
+    assert_equal 1, counters[:non_positive_shares]
+    assert_equal 1, counters[:no_debt_line]
+    assert_equal 200.0, rows["HH"].net_debt # 250 total debt - 50 cash
+    assert_in_delta 12.0, rows["HH"].multiple, 1e-12 # (100 x 10 + 200) / 100
+  ensure
+    PitFact.where(cik: extra.keys).delete_all
+    UniverseMember.where(cik: extra.keys).delete_all
+    PriceBar.where(ticker: extra.values).delete_all
+  end
+end

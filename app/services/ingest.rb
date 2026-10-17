@@ -112,6 +112,7 @@ module Ingest
   # Runs in a transaction, which joins the caller's when there is one, so
   # `ingest_many` really is all-or-nothing.
   def ingest_document(attrs)
+    SearchIndex.ensure! # the triggers must exist before the first chunk is written
     doc = attrs.to_h.transform_keys(&:to_sym)
     missing = REQUIRED_FIELDS.select { |key| doc[key].blank? }
     raise ArgumentError, "document missing required field(s): #{missing.join(', ')}" if missing.any?
@@ -182,6 +183,7 @@ module Ingest
   # one transaction: a bad row rolls back the good ones instead of leaving a
   # half-loaded corpus behind.
   def ingest_many(docs)
+    SearchIndex.ensure! # the triggers must exist before the first chunk is written
     added = skipped = 0
     ActiveRecord::Base.transaction do
       docs.each do |doc|

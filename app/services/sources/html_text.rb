@@ -321,22 +321,36 @@ module Sources
         return if @skip_depth.positive?
 
         index = @stack.rindex { |(name, _hidden)| name == tag }
-        return if index.nil? # a stray close tag with nothing to close
+        if index.nil?
+          # A stray close tag with nothing to close still ends a block in a
+          # browser's rendering ("Alpha</p>Beta" shows two paragraphs), so it
+          # still earns its newline; otherwise two words glue together.
+          @parts << "\n" if @hidden.zero? && (BLOCK_TAGS.include?(tag) || PARAGRAPH_TAGS.include?(tag))
+          return
+        end
 
         # Closing an element closes whatever is still open inside it, as a
         # browser would: an unclosed hidden <span> ends with its table cell
-        # rather than hiding every page that follows.
-        @stack.pop(@stack.length - index).each { |(_name, hidden)| @hidden -= 1 if hidden }
+        # rather than hiding every page that follows. Any block closed that way
+        # still ends with a newline.
+        closed = @stack.pop(@stack.length - index)
+        closed.each { |(_name, hidden)| @hidden -= 1 if hidden }
         return if @hidden.positive?
 
-        @parts << "\n" if BLOCK_TAGS.include?(tag)
+        @parts << "\n" if closed.any? { |(name, _hidden)| BLOCK_TAGS.include?(name) || PARAGRAPH_TAGS.include?(name) }
       end
 
       def handle_data(data)
         return if @skip_depth.positive? || @hidden.positive?
 
         data = HtmlText.unescape(data)
-        return if data.match?(/\A[[:space:]]*\z/)
+        if data.match?(/\A[[:space:]]*\z/)
+          # A whitespace-only text node is still a separator: filings wrap
+          # "<span>the</span><span> </span><span>FASB</span>", and dropping the
+          # middle span glued the words ("theFASB"), which no search can find.
+          @parts << " " unless data.empty? || @parts.empty? || @parts.last.end_with?(" ", "\n")
+          return
+        end
 
         @parts << data
       end

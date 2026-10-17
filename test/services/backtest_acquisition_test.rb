@@ -109,11 +109,71 @@ class BacktestAcquisitionTest < ActiveSupport::TestCase
     assert_equal "RevenueFromContractWithCustomerExcludingAssessedTax", revenue.first[:tag]
   end
 
+  test "tags are chosen per period and filing, so a tag switch keeps every year" do
+    facts = Marshal.load(Marshal.dump(FACTS))
+    facts[:facts][:"us-gaap"][:Revenues] = { units: { USD: [
+      # FY2023 was tagged Revenues; FY2024 moved to the contract-revenue tag.
+      { start: "2023-01-01", end: "2023-12-31", val: 2_200_000_000, form: "10-K", fy: 2023, fp: "FY", filed: "2024-02-21", accn: "k23" },
+      # The same FY2024 figure under the second tag must not duplicate the first tag's row.
+      { start: "2024-01-01", end: "2024-12-31", val: 2_440_000_000, form: "10-K", fy: 2024, fp: "FY", filed: "2025-02-20", accn: "k24" }
+    ] } }
+    rows = Backtest::Fundamentals.observations(facts, cik: 1, ticker: "T")
+    revenue = rows.select { |r| r[:concept] == "revenue" && r[:form] == "10-K" }.sort_by { |r| r[:period_end] }
+    assert_equal [2023, 2024, 2024], revenue.map { |r| r[:period_end].year }
+    assert_equal %w[Revenues RevenueFromContractWithCustomerExcludingAssessedTax RevenueFromContractWithCustomerExcludingAssessedTax], revenue.map { |r| r[:tag] }
+    assert_equal 2_200_000_000.0, revenue.first[:value]
+  end
+
+  test "D&A is summed from depreciation and intangible amortisation when no combined tag covers a filing" do
+    facts = { facts: { "us-gaap": {
+      DepreciationDepletionAndAmortization: { units: { USD: [
+        { start: "2023-01-01", end: "2023-12-31", val: 30_000_000, form: "10-K", fy: 2023, fp: "FY", filed: "2024-02-21", accn: "k23" }
+      ] } },
+      Depreciation: { units: { USD: [
+        { start: "2023-01-01", end: "2023-12-31", val: 25_000_000, form: "10-K", fy: 2023, fp: "FY", filed: "2024-02-21", accn: "k23" },
+        { start: "2024-01-01", end: "2024-12-31", val: 26_000_000, form: "10-K", fy: 2024, fp: "FY", filed: "2025-02-20", accn: "k24" }
+      ] } },
+      AmortizationOfIntangibleAssets: { units: { USD: [
+        { start: "2024-01-01", end: "2024-12-31", val: 4_000_000, form: "10-K", fy: 2024, fp: "FY", filed: "2025-02-20", accn: "k24" },
+        { start: "2025-01-01", end: "2025-12-31", val: 5_000_000, form: "10-K", fy: 2025, fp: "FY", filed: "2026-02-19", accn: "k25" }
+      ] } }
+    } } }
+    rows = Backtest::Fundamentals.observations(facts, cik: 1).select { |r| r[:concept] == "dep_amort" }.sort_by { |r| r[:period_end] }
+    assert_equal [[2023, 30_000_000.0, "DepreciationDepletionAndAmortization"], [2024, 30_000_000.0, "Depreciation+AmortizationOfIntangibleAssets"]],
+                 rows.map { |r| [r[:period_end].year, r[:value], r[:tag]] }, "FY2025 has amortisation but no depreciation, so no row"
+  end
+
+  test "total debt is captured for filers that tag neither split line" do
+    facts = { facts: { "us-gaap": { LongTermDebt: { units: { USD: [
+      { end: "2024-12-31", val: 180_000_000_000, form: "10-K", fy: 2024, fp: "FY", filed: "2025-02-20", accn: "k24" }
+    ] } } } } }
+    rows = Backtest::Fundamentals.observations(facts, cik: 1)
+    assert_equal [["debt_total", 180_000_000_000.0, "LongTermDebt"]], rows.map { |r| [r[:concept], r[:value], r[:tag]] }
+    assert_includes PitFact::CONCEPTS, "debt_total"
+  end
+
+  test "members with no filing before mid-way through the following year are marked as non-filers" do
+    UniverseMember.create!(cik: 21, ticker: "OLD", anchor_year: 2016)
+    UniverseMember.create!(cik: 22, ticker: "NEW", anchor_year: 2016)
+    UniverseMember.create!(cik: 23, ticker: nil, anchor_year: 2016, dropout_reason: "no_current_ticker")
+    PitFact.create!(cik: 21, concept: "revenue", period_end: Date.new(2016, 12, 31), value: 1.0, filed: Date.new(2017, 2, 20), form: "10-K")
+    PitFact.create!(cik: 22, concept: "revenue", period_end: Date.new(2016, 12, 31), value: 1.0, filed: Date.new(2019, 2, 20), form: "10-K")
+    assert_equal 1, Backtest::Fundamentals.mark_non_filers!(2016)
+    assert_nil UniverseMember.find_by(cik: 21).dropout_reason
+    assert_equal "not_a_filer_in_anchor_year", UniverseMember.find_by(cik: 22).dropout_reason
+    assert_equal "no_current_ticker", UniverseMember.find_by(cik: 23).dropout_reason, "an existing reason is kept"
+  ensure
+    PitFact.where(cik: [21, 22, 23]).delete_all
+    UniverseMember.where(cik: [21, 22, 23]).delete_all
+  end
+
   test "pit facts answer 'what was known on this date'" do
     rows = Backtest::Fundamentals.observations(FACTS, cik: 780571, ticker: "ITRI")
     PitFact.insert_all(rows, unique_by: %i[cik concept period_end filed])
     before = PitFact.known_on(780571, "revenue", Date.new(2025, 2, 19))
     assert_nil before, "the 10-K had not been filed yet"
+    assert_nil PitFact.known_on(780571, "revenue", Date.new(2025, 2, 20)), "a filing dated t is public after t's close"
+    refute_nil PitFact.known_on(780571, "revenue", Date.new(2025, 2, 21))
     original = PitFact.known_on(780571, "revenue", Date.new(2025, 6, 1))
     assert_equal 2_440_000_000.0, original.value
     restated = PitFact.known_on(780571, "revenue", Date.new(2026, 3, 1))
@@ -151,17 +211,71 @@ class BacktestAcquisitionTest < ActiveSupport::TestCase
   test "prices mark members without history as dropouts and count sources" do
     UniverseMember.create!(cik: 11, ticker: "GOOD", anchor_year: 2016)
     UniverseMember.create!(cik: 12, ticker: "GONE", anchor_year: 2016)
-    bars = ->(ticker, **_o) { ticker == "GOOD" ? Sources::PriceHistory.parse_yahoo(YAHOO, today: Date.new(2026, 11, 2)) : [] }
-    stubbing(Sources::PriceHistory, monthly_bars: bars) do
+    history = lambda do |ticker, **_o|
+      if ticker == "GOOD"
+        { bars: Sources::PriceHistory.parse_yahoo(YAHOO, today: Date.new(2026, 11, 2)), splits: [{ date: Date.new(2026, 8, 14), ratio: 2.0 }] }
+      else
+        { bars: [], splits: [] }
+      end
+    end
+    stubbing(Sources::PriceHistory, history: history) do
       totals = Backtest::Prices.build!(anchor_year: 2016)
       assert_equal 1, totals[:with_prices]
       assert_equal 1, totals[:no_price_history]
       assert_equal 2, totals[:bars]
+      assert_equal 1, totals[:splits]
       assert_equal "no_price_history", UniverseMember.find_by(cik: 12).dropout_reason
       assert UniverseMember.find_by(cik: 11).has_prices
+      assert_equal [[Date.new(2026, 8, 14), 2.0]], SplitEvent.where(ticker: "GOOD").pluck(:date, :ratio)
     end
   ensure
     PriceBar.where(ticker: %w[GOOD GONE]).delete_all
+    SplitEvent.where(ticker: %w[GOOD GONE]).delete_all
     UniverseMember.where(cik: [11, 12]).delete_all
+  end
+
+  test "a dropout for another reason survives a successful price load" do
+    UniverseMember.create!(cik: 13, ticker: "LATE", anchor_year: 2016, dropout_reason: "not_a_filer_in_anchor_year")
+    history = ->(_ticker, **_o) { { bars: Sources::PriceHistory.parse_yahoo(YAHOO, today: Date.new(2026, 11, 2)), splits: [] } }
+    stubbing(Sources::PriceHistory, history: history) do
+      Backtest::Prices.build!(anchor_year: 2016)
+      member = UniverseMember.find_by(cik: 13)
+      assert member.has_prices
+      assert_equal "not_a_filer_in_anchor_year", member.dropout_reason
+    end
+  ensure
+    PriceBar.where(ticker: "LATE").delete_all
+    UniverseMember.where(cik: 13).delete_all
+  end
+
+  test "ticker map keeps the first-listed ticker for a CIK, not the shortest" do
+    index = {
+      "0": { cik_str: 1166691, ticker: "CMCSA", title: "COMCAST CORP" },
+      "1": { cik_str: 1166691, ticker: "CCZ", title: "COMCAST CORP" },
+      "2": { cik_str: 1652044, ticker: "GOOGL", title: "Alphabet Inc." },
+      "3": { cik_str: 1652044, ticker: "GOOG", title: "Alphabet Inc." }
+    }
+    stubbing(Sources::Http, fetch_json: ->(_url, **_o) { index }) do
+      map = Backtest::Universe.ticker_map
+      assert_equal "CMCSA", map[1166691]
+      assert_equal "GOOGL", map[1652044]
+    end
+  end
+
+  test "yahoo split events parse to dated ratios, oldest first" do
+    payload = { chart: { result: [{
+      timestamp: [], indicators: {},
+      events: { splits: {
+        "1717214400": { date: 1_718_026_200, numerator: 10.0, denominator: 1.0, splitRatio: "10:1" },
+        "1625112000": { date: 1_626_787_800, numerator: 4.0, denominator: 1.0, splitRatio: "4:1" },
+        "1500000000": { date: 1_500_000_000, numerator: 1.0, denominator: 8.0, splitRatio: "1:8" }
+      } }
+    }] } }
+    splits = Sources::PriceHistory.parse_splits(payload)
+    assert_equal [Date.new(2017, 7, 14), Date.new(2021, 7, 20), Date.new(2024, 6, 10)], splits.map { |s| s[:date] }
+    assert_in_delta 0.125, splits[0][:ratio]
+    assert_equal [4.0, 10.0], splits.last(2).map { |s| s[:ratio] }
+    assert_equal [], Sources::PriceHistory.parse_splits(YAHOO), "no events key means no splits"
+    assert_equal [], Sources::PriceHistory.parse_splits(nil)
   end
 end

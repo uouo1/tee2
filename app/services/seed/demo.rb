@@ -285,9 +285,9 @@ module Seed
       enterprise_value = fin[:ev_ebitda_target] * ebitda
       price = [1.0, (enterprise_value - fin[:net_debt]) / fin[:shares]].max
       {
-        price: price.round(2),
-        low: (price * rng.rand(0.68..0.78)).round(2),
-        high: (price * rng.rand(1.04..1.18)).round(2)
+        price: Sources::Sec.py_round(price, 2),
+        low: Sources::Sec.py_round(price * rng.rand(0.68..0.78), 2),
+        high: Sources::Sec.py_round(price * rng.rand(1.04..1.18), 2)
       }
     end
 
@@ -312,13 +312,13 @@ module Seed
         {
           fiscal_year: year,
           is_estimate: year > base_year,
-          revenue: revenue.round(1),
-          ebitda: ebitda.round(1),
-          ebit: ebit.round(1),
-          net_income: net_income.round(1),
-          eps: (net_income / spec[:shares]).round(2),
-          dep_amort: dep_amort.round(1),
-          capex: (revenue * spec[:capex_pct]).round(1),
+          revenue: Sources::Sec.py_round(revenue, 1),
+          ebitda: Sources::Sec.py_round(ebitda, 1),
+          ebit: Sources::Sec.py_round(ebit, 1),
+          net_income: Sources::Sec.py_round(net_income, 1),
+          eps: Sources::Sec.py_round(net_income / spec[:shares], 2),
+          dep_amort: Sources::Sec.py_round(dep_amort, 1),
+          capex: Sources::Sec.py_round(revenue * spec[:capex_pct], 1),
           nwc_change: (revenue * 0.012).round(1),
           tax_rate: tax_rate
         }

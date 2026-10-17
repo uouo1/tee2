@@ -17,8 +17,18 @@ module Exporters
   # where each slide responds to #kind, #title, #subtitle and #payload_hash
   # (symbol keys, the Python payload shapes from Pitchbooks' slide builders).
   module Pdf
-    # The built-in Helvetica face is deliberate (no font files to ship); text is
-    # transliterated to its character set below, so Prawn's warning is noise.
+    # DejaVu Sans (a TrueType face with wide Unicode coverage) when the system
+    # has it, so filing quotes keep their true minus signs, deltas and bullets;
+    # otherwise Prawn's built-in Helvetica, whose Windows-1252 repertoire is
+    # reached by transliteration (see `clean`). An audit found the appendix
+    # quoting a filing with "?" where the filing had Δ and ◾.
+    FONT_DIR = ENV.fetch("ARGOS_PDF_FONT_DIR", "/usr/share/fonts/truetype/dejavu")
+    UNICODE_FONT = {
+      normal: File.join(FONT_DIR, "DejaVuSans.ttf"),
+      bold: File.join(FONT_DIR, "DejaVuSans-Bold.ttf"),
+      italic: File.join(FONT_DIR, "DejaVuSans.ttf"),
+      bold_italic: File.join(FONT_DIR, "DejaVuSans-Bold.ttf")
+    }.freeze
     Prawn::Fonts::AFM.hide_m17n_warning = true
 
     LIGHT = Charts::PALETTE.fetch(:light)
@@ -96,6 +106,7 @@ module Exporters
         info: { Title: clean(deck.title.presence || "Pitch book"), Author: clean(banker.presence || "Argos"),
                 Creator: "Argos" }
       )
+      use_unicode_font(pdf)
       pdf.fill_color INK
       slides = deck.slides.to_a
       slides.each_with_index do |slide, index|
@@ -132,8 +143,11 @@ module Exporters
     def number(value, decimals) = fixed(value, decimals, grouping: true)
 
     # f"{value:.{decimals}f}", optionally with thousands separators.
+    # Kernel#format rounds the shortest decimal rendering half-up (29.95 ->
+    # "30.0"); Python's f-string rounds the exact binary value (-> "29.9"), as
+    # Charts.fixed does, so the deck prints the same figure in every format.
     def fixed(value, decimals, grouping: false)
-      text = format("%.#{decimals}f", value.to_f)
+      text = Charts.fixed(value.to_f, decimals: decimals)
       return text unless grouping
 
       integer, fraction = text.split(".", 2)
@@ -141,10 +155,39 @@ module Exporters
       fraction ? "#{integer}.#{fraction}" : integer
     end
 
-    # Text that the built-in font can encode (see TRANSLITERATIONS).
+    def unicode_font? = File.exist?(UNICODE_FONT[:normal]) && File.exist?(UNICODE_FONT[:bold])
+
+    def use_unicode_font(pdf)
+      return unless unicode_font?
+
+      pdf.font_families.update("DejaVu" => UNICODE_FONT)
+      pdf.font("DejaVu")
+    end
+
+    # Text the current font can draw. With the Unicode font, only characters
+    # the face lacks become "?" (CJK, for one); soft hyphens are dropped. With
+    # Helvetica, the Windows-1252 transliteration applies.
     def clean(text)
+      return transliterate(text) unless unicode_font?
+
+      text.to_s.delete("\u00AD").each_char.map { |ch| glyph?(ch) ? ch : "?" }.join
+    end
+
+    # Text that the built-in Helvetica face can encode (see TRANSLITERATIONS).
+    def transliterate(text)
       text = text.to_s.gsub(TRANSLITERATION_RE, TRANSLITERATIONS)
       text.encode("Windows-1252", invalid: :replace, undef: :replace, replace: "?").encode("UTF-8")
+    end
+
+    # Glyph coverage of the Unicode font, probed once and memoised per character.
+    def glyph?(char)
+      return true if char.ord < 0x80
+
+      @glyphs ||= {}
+      @glyphs.fetch(char) do
+        @probe ||= Prawn::Document.new.tap { |d| d.font_families.update("DejaVu" => UNICODE_FONT); d.font("DejaVu") }.font
+        @glyphs[char] = @probe.respond_to?(:glyph_present?) ? @probe.glyph_present?(char) : true
+      end
     end
 
     # Every paragraph is drawn with inline_format on so the few <b> runs below

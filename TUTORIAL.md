@@ -10,6 +10,19 @@ its valuation page is made of.
 Everything below was run on 12–13 October 2026. Prices move and companies file,
 so your figures will differ in detail; the shape of the exercise will not.
 
+> **Read before trusting the numbers (added 17 October 2026).** An
+> investment-analyst audit of this tutorial's output (`docs/AUDIT.md`) found
+> that the Itron valuation below is overstated: net debt was read from the
+> December 2025 10-K ($228m) while the June 2026 10-Q in the same corpus shows
+> about $830m after a $600m convertible, so EV/EBITDA is nearer 12.7x than
+> 11.0x and the DCF base nearer $75 than $89; the multiples are on fiscal 2025
+> rather than the latest twelve months; the WACC is a constant; and the
+> "+13% to +86%" wording treats a peer-multiple range as upside, which the
+> repository's own backtest does not support. The Rails services in `app/`
+> correct the mechanics (`docs/RAILS_PORT.md`, items 11–22); the Python build
+> this tutorial drives does not. The search count "15 documents" for `tariff`
+> is also a known artefact of top-k chunk ranking (its facet says 28).
+
 > **Data sources.** Fundamentals and filings come from SEC EDGAR's public APIs
 > (`data.sec.gov`, `sec.gov/Archives`). The quote comes from a public quote
 > endpoint. Neither is a licensed data feed: fine for learning and for internal

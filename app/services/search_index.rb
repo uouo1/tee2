@@ -32,8 +32,25 @@ module SearchIndex
 
   module_function
 
+  # Creates the index and triggers when missing, and rebuilds the index from the
+  # chunks table whenever it is new or its row count disagrees with chunks: a
+  # database built from schema.rb (which cannot hold a virtual table) and then
+  # ingested into has unindexed chunks, and an FTS5 'delete' for a row the
+  # index never saw corrupts it (an audit reproduced both).
   def ensure!
-    STATEMENTS.each { |sql| ActiveRecord::Base.connection.execute(sql) }
+    connection = ActiveRecord::Base.connection
+    existed = connection.select_value("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunks_fts'").present?
+    STATEMENTS.each { |sql| connection.execute(sql) }
+    rebuild! if !existed || out_of_step?
+  end
+
+  def out_of_step?
+    connection = ActiveRecord::Base.connection
+    chunks = connection.select_value("SELECT COUNT(*) FROM chunks").to_i
+    indexed = connection.select_value("SELECT COUNT(*) FROM chunks_fts").to_i
+    chunks != indexed
+  rescue ActiveRecord::StatementInvalid
+    true
   end
 
   def drop!

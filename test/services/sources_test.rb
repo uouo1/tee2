@@ -147,8 +147,10 @@ class SourcesTest < ActiveSupport::TestCase
 
   test "rows carry exactly the financials columns" do
     row = Sources::Sec.build_financials(facts_fixture).first
-    expected = %i[fiscal_year is_estimate revenue ebitda ebit net_income eps dep_amort capex nwc_change tax_rate]
+    expected = %i[fiscal_year period_type period_end is_estimate revenue ebitda ebit net_income eps dep_amort capex nwc_change tax_rate]
     assert_equal expected, row.keys
+    assert_equal "FY", row[:period_type]
+    assert_equal Date.new(2024, 12, 31), row[:period_end]
   end
 
   test "quarter is not mistaken for a year" do
@@ -290,7 +292,108 @@ class SourcesTest < ActiveSupport::TestCase
     assert_in_delta 33_000_000, shares[:diluted]
     assert_nil shares[:basic]
     gaap(facts).delete(:WeightedAverageNumberOfDilutedSharesOutstanding)
-    assert_equal({ diluted: nil, basic: nil }, Sources::Sec.shares(facts))
+    assert_equal({ diluted: nil, basic: nil, basis: "none", fallback_reason: nil }, Sources::Sec.shares(facts))
+  end
+
+  test "a weighted diluted count from an earlier year than the revenue falls back to the cover page" do
+    # LyondellBasell stopped tagging the count after FY2011; the stale figure was 572m against 323m on the cover.
+    facts = facts_fixture
+    gaap(facts)[:WeightedAverageNumberOfDilutedSharesOutstanding] = { units: { shares: [
+      fact(57_200_000, "2024-01-01", "2024-12-31", filed: "2025-02-20")
+    ] } }
+    shares = Sources::Sec.shares(facts)
+    assert_in_delta 43_790_000, shares[:diluted]
+    assert_equal "cover_page", shares[:basis]
+    assert_match(/FY2024.*FY2025/, shares[:fallback_reason])
+  end
+
+  test "a weighted diluted count off-scale against the cover page falls back to the cover page" do
+    # McDonald's tags the count in millions: 716.4 "shares" against a 716m cover count.
+    facts = facts_fixture
+    gaap(facts)[:WeightedAverageNumberOfDilutedSharesOutstanding] = { units: { shares: [fact(43.8, "2025-01-01", "2025-12-31")] } }
+    shares = Sources::Sec.shares(facts)
+    assert_in_delta 43_790_000, shares[:diluted]
+    assert_equal "cover_page", shares[:basis]
+    assert_match(/off-scale/, shares[:fallback_reason])
+    gaap(facts)[:WeightedAverageNumberOfDilutedSharesOutstanding] = { units: { shares: [fact(46_320_000, "2025-01-01", "2025-12-31")] } }
+    assert_equal "weighted_diluted", Sources::Sec.shares(facts)[:basis]
+  end
+
+  test "tags are resolved per year, so a tag switch keeps the earlier years" do
+    facts = facts_fixture
+    # FY2023 was tagged Revenues; the contract-revenue tag only has 2024-2025.
+    gaap(facts)[:Revenues] = { units: { USD: [
+      fact(1_800e6, "2023-01-01", "2023-12-31", filed: "2024-02-20"),
+      fact(9_999e6, "2025-01-01", "2025-12-31") # loses to the preferred tag for the same year
+    ] } }
+    by_year = Sources::Sec.duration_values(facts, Sources::Sec::TAGS[:revenue])
+    assert_equal [2023, 2024, 2025], by_year.keys.sort
+    assert_in_delta 1_800e6, by_year[2023]
+    assert_in_delta 2_400e6, by_year[2025]
+    entries = Sources::Sec.duration_entries(facts, Sources::Sec::TAGS[:revenue])
+    assert_equal "Revenues", entries[2023][:tag]
+    assert_equal Date.new(2025, 12, 31), entries[2025][:period_end]
+  end
+
+  test "the latest balance sheet is the newest 10-K or 10-Q, read at one date, with the claims the bridge deducts" do
+    facts = facts_fixture
+    gaap(facts)[:CashAndCashEquivalentsAtCarryingValue][:units][:USD] << instant(745.2e6, "2026-06-30", form: "10-Q", fp: "Q2", filed: "2026-08-01")
+    gaap(facts)[:LongTermDebtNoncurrent][:units][:USD] << instant(1_575.2e6, "2026-06-30", form: "10-Q", fp: "Q2", filed: "2026-08-01")
+    gaap(facts)[:MinorityInterest] = { units: { USD: [instant(21.9e6, "2026-06-30", form: "10-Q", fp: "Q2", filed: "2026-08-01")] } }
+    balance = Sources::Sec.latest_balance_sheet(facts)
+    assert_equal Date.new(2026, 6, 30), balance[:as_of]
+    assert_equal "10-Q", balance[:form]
+    assert_equal 745.2, balance[:cash]
+    assert_nil balance[:debt_current], "no current debt tagged at that date"
+    assert_equal 1575.2, balance[:debt_noncurrent]
+    assert_equal 830.0, balance[:net_debt]
+    assert_equal 21.9, balance[:minority_interest]
+    assert_equal 0.0, balance[:preferred_equity]
+    assert_nil balance[:debt_note]
+    # The fiscal-year view is unchanged: 450 + 800 - 1000 at 2025-12-31.
+    assert_in_delta 250.0, Sources::Sec.net_debt(facts, 2025)
+  end
+
+  test "a balance sheet with no debt line is bridged at zero debt and says so" do
+    facts = facts_fixture
+    gaap(facts).delete(:LongTermDebtCurrent)
+    gaap(facts).delete(:LongTermDebtNoncurrent)
+    balance = Sources::Sec.latest_balance_sheet(facts)
+    assert_equal(-1000.0, balance[:net_debt])
+    assert_match(/No debt line tagged at 2025-12-31/, balance[:debt_note])
+    gaap(facts)[:LongTermDebt] = { units: { USD: [instant(1_250e6, "2025-12-31")] } }
+    assert_equal 250.0, Sources::Sec.latest_balance_sheet(facts)[:net_debt], "a total-debt tag stands in for the split lines"
+  end
+
+  test "a 10-Q after the last fiscal year adds a trailing-twelve-month row" do
+    facts = facts_fixture
+    revenue = gaap(facts)[:RevenueFromContractWithCustomerExcludingAssessedTax][:units][:USD]
+    revenue << fact(1_300e6, "2026-01-01", "2026-06-30", form: "10-Q", fp: "Q2", filed: "2026-08-01")
+    revenue << fact(1_150e6, "2025-01-01", "2025-06-30", form: "10-Q", fp: "Q2", filed: "2026-08-01") # prior-year comparable
+    revenue << fact(640e6, "2026-04-01", "2026-06-30", form: "10-Q", fp: "Q2", filed: "2026-08-01")   # the quarter alone: ignored
+    oi = gaap(facts)[:OperatingIncomeLoss][:units][:USD]
+    oi << fact(170e6, "2026-01-01", "2026-06-30", form: "10-Q", fp: "Q2", filed: "2026-08-01")
+    oi << fact(140e6, "2025-01-01", "2025-06-30", form: "10-Q", fp: "Q2", filed: "2026-08-01")
+    rows = Sources::Sec.build_financials(facts)
+    ltm = rows.last
+    assert_equal %w[FY FY LTM], rows.map { |r| r[:period_type] }
+    assert_equal 2025, ltm[:fiscal_year]
+    assert_equal Date.new(2026, 6, 30), ltm[:period_end]
+    assert_equal 2550.0, ltm[:revenue], "2,400 + 1,300 - 1,150"
+    assert_equal 330.0, ltm[:ebit], "300 + 170 - 140"
+    assert_equal 60.0, ltm[:dep_amort], "no quarterly D&A tagged: the fiscal-year figure stands in"
+    assert_equal 390.0, ltm[:ebitda]
+    assert_nil ltm[:nwc_change]
+    assert_equal rows[-2][:tax_rate], ltm[:tax_rate]
+    assert_equal Date.new(2025, 12, 31), rows[-2][:period_end]
+  end
+
+  test "no trailing row without a 10-Q beyond the fiscal year or without the prior-year comparable" do
+    assert_equal %w[FY FY], Sources::Sec.build_financials(facts_fixture).map { |r| r[:period_type] }
+    facts = facts_fixture
+    gaap(facts)[:RevenueFromContractWithCustomerExcludingAssessedTax][:units][:USD] <<
+      fact(1_300e6, "2026-01-01", "2026-06-30", form: "10-Q", fp: "Q2", filed: "2026-08-01")
+    assert_equal %w[FY FY], Sources::Sec.build_financials(facts).map { |r| r[:period_type] }
   end
 
   test "net debt and share counts round like Python" do
@@ -470,6 +573,14 @@ class SourcesTest < ActiveSupport::TestCase
     assert_in_delta 46.32, market.shares_diluted # weighted diluted, in millions
     assert_in_delta 43.79, market.shares_basic   # cover page
     assert_in_delta 250.0, market.net_debt
+    assert_equal Date.new(2025, 12, 31), market.net_debt_as_of
+    assert_equal "10-K", market.balance_sheet_form
+    assert_equal 0.0, market.minority_interest
+    assert_equal 0.0, market.preferred_equity
+    assert_nil market.debt_note
+    assert_equal "weighted_diluted", result[:shares_basis]
+    assert_equal Date.new(2025, 12, 31), result[:net_debt_as_of]
+    assert_nil result[:ltm_period_end]
     assert_in_delta 123.45, market.share_price
     assert_in_delta 80.1, market.week52_low
     assert_in_delta 130.9, market.week52_high
@@ -520,6 +631,31 @@ class SourcesTest < ActiveSupport::TestCase
     market = Company.find_ticker("ITRI").market_datum
     assert_equal 43.78, market.shares_basic # Float#round would store 43.79
     assert_equal 43.78, market.shares_diluted
+  end
+
+  test "load company stores the LTM row and the 10-Q balance sheet when a quarter extends the year" do
+    facts = facts_fixture
+    revenue = gaap(facts)[:RevenueFromContractWithCustomerExcludingAssessedTax][:units][:USD]
+    revenue << fact(1_300e6, "2026-01-01", "2026-06-30", form: "10-Q", fp: "Q2", filed: "2026-08-01")
+    revenue << fact(1_150e6, "2025-01-01", "2025-06-30", form: "10-Q", fp: "Q2", filed: "2026-08-01")
+    gaap(facts)[:CashAndCashEquivalentsAtCarryingValue][:units][:USD] << instant(900e6, "2026-06-30", form: "10-Q", fp: "Q2", filed: "2026-08-01")
+    gaap(facts)[:LongTermDebtNoncurrent][:units][:USD] << instant(1_500e6, "2026-06-30", form: "10-Q", fp: "Q2", filed: "2026-08-01")
+    result = nil
+    stubbing(Sources::Sec, resolve_cik: ->(_t) { "0000780571" }, fetch_submissions: ->(_c) { submissions_fixture },
+                           fetch_facts: ->(_c) { facts }) do
+      stubbing(Sources::Market, fetch_quote: ->(_t, **) { quote_fixture }) do
+        result = Sources::Sec.load_company("ITRI", with_documents: false)
+      end
+    end
+    company = Company.find_ticker("ITRI")
+    assert_equal [[2024, "FY"], [2025, "FY"], [2025, "LTM"]], company.financials.order(:fiscal_year, :period_type).pluck(:fiscal_year, :period_type)
+    assert_in_delta 2550.0, company.financials.trailing.first.revenue
+    assert_equal [2024, 2025], result[:fiscal_years], "the summary lists fiscal years only"
+    assert_equal Date.new(2026, 6, 30), result[:ltm_period_end]
+    market = company.market_datum
+    assert_equal 600.0, market.net_debt # 1,500 - 900 at the June 10-Q, not 250 at the December 10-K
+    assert_equal Date.new(2026, 6, 30), market.net_debt_as_of
+    assert_equal "10-Q", market.balance_sheet_form
   end
 
   test "load company skips market data without a quote or share count" do
@@ -1081,5 +1217,32 @@ class MarketQuoteCacheTest < ActiveSupport::TestCase
     assert_includes url, "ITRI"
     assert_includes url, "asof=2026-10-14"
     refute_equal url, Sources::Market.quote_url("itri", on: Date.new(2026, 10, 15))
+  end
+end
+
+# Regression tests for the extractor defects an audit of 213 cached filings
+# found: words glued together on stray or misnested close tags and on
+# whitespace-only spans.
+class HtmlTextAuditTest < ActiveSupport::TestCase
+  test "a stray close tag still ends its block" do
+    assert_equal "Alpha text\n\nBeta text", Sources::HtmlText.html_to_text("Alpha text</p>Beta text").strip
+  end
+
+  test "closing an outer element closes an inner paragraph with a break, not a glue" do
+    text = Sources::HtmlText.html_to_text("<font><p>First para</font></p>second para")
+    assert_match(/First para\s+second para/, text)
+    refute_includes text, "parasecond"
+  end
+
+  test "a whitespace-only span separates the words around it" do
+    text = Sources::HtmlText.html_to_text("<p><span>the</span><span> </span><span>FASB</span> issued <span>guidance</span><span>\n</span><span>on</span> leases.</p>")
+    assert_includes text, "the FASB issued guidance on leases."
+    refute_includes text, "theFASB"
+  end
+
+  test "words inside one text node keep their spacing and a hidden span still hides" do
+    text = Sources::HtmlText.html_to_text('<p>Revenue <span style="display:none">hidden</span>grew 4%.</p>')
+    assert_includes text, "Revenue grew 4%."
+    refute_includes text, "hidden"
   end
 end

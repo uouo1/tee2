@@ -18,6 +18,17 @@ Everything runs locally on the Python standard library — no framework, no
 service, no API key, no network call. The two optional dependencies only widen
 the export menu.
 
+> **Status (17 October 2026).** This Python build is the reference
+> implementation and is being replaced by the Ruby on Rails application in this
+> same repository (`app/`, `docs/RAILS_PORT.md`). An independent audit
+> (`docs/AUDIT.md`) found valuation defects in this build that the Rails
+> services already correct and that are **not** fixed here: net debt taken from
+> the last fiscal year end rather than the latest balance sheet, no LTM
+> multiples, a constant WACC, a working-capital charge on the revenue level, an
+> exit-multiple terminal value discounted half a year early, and a concluded
+> range that averages in the 52-week trading range. Read any valuation number
+> from this build with those caveats, and read `docs/AUDIT.md` first.
+
 ## Quick start
 
 ```bash

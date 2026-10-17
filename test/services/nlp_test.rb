@@ -391,7 +391,13 @@ class NlpKpiBoundsTest < ActiveSupport::TestCase
     assert_equal [114.0], Nlp.extract_kpis("Net dollar retention of 114%.").map { |k| k[:value] }
   end
 
-  test "negative currency amounts are rejected" do
-    assert_empty Nlp.extract_kpis("Free cash flow -$12 million.").select { |k| k[:metric] == "free_cash_flow" && k[:value].negative? }
+  test "a KPI keeps its sign: negative cash flow and margins are stored negative, negative backlog is rejected" do
+    assert_equal [-12.0], Nlp.extract_kpis("Free cash flow -$12 million.").map { |k| k[:value] }
+    assert_equal [-5.2], Nlp.extract_kpis("Operating margin was -5.2% this year.").map { |k| k[:value] }
+    assert_equal [-3.0], Nlp.extract_kpis("Gross margin declined to negative 3%.").map { |k| k[:value] }
+    assert_equal [-1200.0], Nlp.extract_kpis("Free cash flow of −$1.2 billion.").map { |k| k[:value] }
+    assert_equal [12.0], Nlp.extract_kpis("Free cash flow $12 million.").map { |k| k[:value] }
+    assert_empty Nlp.extract_kpis("Backlog of -$40 million."), "a negative backlog is a parse, not a fact"
+    assert_empty Nlp.extract_kpis("Revenue grew -4%."), "growth is non-negative by construction; declines have their own metric"
   end
 end

@@ -287,11 +287,14 @@ class ValuationCompsTest < ActiveSupport::TestCase
 
   test "rows carry the inputs behind each multiple" do
     row = Valuation.comps_table(%w[HLDX])[:rows].first
-    assert_equal %i[ticker name country share_price market_cap enterprise_value net_debt shares_diluted shares_basic
-                    revenue ebitda ebitda_margin ev_revenue ev_ebitda pe fiscal_year], row.keys
+    assert_equal %i[ticker name country share_price price_date market_cap enterprise_value net_debt net_debt_as_of other_claims
+                    shares_diluted shares_basic revenue ebitda ebitda_margin ev_revenue ev_ebitda pe fiscal_year basis period_type],
+                 row.keys
     assert_equal 141.0, row[:shares_diluted]
     assert_equal 1320.0, row[:revenue]
     assert_equal 2026, row[:fiscal_year]
+    assert_equal "FY2026", row[:basis], "every multiple says which period it is on"
+    assert_equal({ "FY2026" => 1 }, Valuation.comps_table(%w[HLDX])[:bases])
   end
 
   test "precedents include premium statistics" do
@@ -374,7 +377,6 @@ class ValuationDcfAssumptionsTest < ActiveSupport::TestCase
     a = Valuation::DcfAssumptions.new
     assert_equal 0.0, a.base_revenue
     assert_equal 0.12, a.revenue_growth
-    assert_equal 0.15, a.growth_fade
     assert_equal 0.25, a.ebitda_margin
     assert_equal 0.004, a.margin_expansion
     assert_equal 0.05, a.da_pct_revenue
@@ -386,9 +388,18 @@ class ValuationDcfAssumptionsTest < ActiveSupport::TestCase
     assert_nil a.exit_multiple
     assert_equal 5, a.years
     assert_equal 0.0, a.net_debt
+    assert_equal 0.0, a.other_claims
     assert_equal 1.0, a.shares_diluted
     assert_equal true, a.mid_year_convention
+    assert_equal true, a.terminal_capex_floor
+    assert_equal 1.0, a.stub_fraction
     assert_equal 2027, a.start_year
+    assert_nil a.valuation_date
+  end
+
+  test "coerce parses the valuation date" do
+    assert_equal Date.new(2026, 10, 12), Valuation::DcfAssumptions.coerce("valuation_date" => "2026-10-12")[:valuation_date]
+    assert_equal Date.new(2026, 10, 12), Valuation::DcfAssumptions.coerce(valuation_date: Date.new(2026, 10, 12))[:valuation_date]
   end
 
   test "keyword initialiser and value equality" do
@@ -435,7 +446,7 @@ class ValuationDcfAssumptionsTest < ActiveSupport::TestCase
   test "to_h has every field with symbol keys" do
     h = Valuation::DcfAssumptions.new(wacc: 0.1).to_h
     assert_equal Valuation::DcfAssumptions.members, h.keys
-    assert_equal 17, h.size
+    assert_equal 20, h.size
     assert_equal 0.1, h[:wacc]
     assert_equal Valuation::DcfAssumptions.new(wacc: 0.1), Valuation::DcfAssumptions.new(**h)
   end
@@ -468,28 +479,100 @@ class ValuationDcfTest < ActiveSupport::TestCase
     assert_in_delta result[:pv_explicit] + result[:pv_terminal], result[:enterprise_value], 0.5
     assert_in_delta result[:enterprise_value] - 200.0, result[:equity_value], 0.5
     assert_in_delta result[:equity_value] / 100.0, result[:value_per_share], 0.05
-    assert_equal %i[year revenue growth ebitda ebitda_margin ebit taxes dep_amort capex nwc_change fcf
-                    discount_factor pv_fcf], result[:projections].first.keys
+    assert_equal %i[year revenue growth ebitda ebitda_margin ebit taxes dep_amort capex nwc_change fcf_full_year
+                    period_fraction fcf discount_period discount_factor pv_fcf], result[:projections].first.keys
+    # The bridge can be ticked and tied from the displayed rows.
+    row = result[:projections].first
+    assert_in_delta row[:ebit] - row[:taxes] + row[:dep_amort] - row[:capex] - row[:nwc_change], row[:fcf_full_year], 0.06
     assert_equal (2027..2031).to_a, result[:projections].map { |row| row[:year] }
   end
 
-  test "result matches the reference implementation" do
+  test "result matches the hand-checked figures" do
+    # Year 1 by hand: revenue 1,100; EBITDA at 25.4% = 279.4; D&A 55; EBIT 224.4; tax 56.1;
+    # capex 44; working capital 1% of the 100 revenue increase = 1.0 (the reference
+    # charged 1% of the revenue LEVEL, 11.0); FCF 178.3 discounted half a year at 10%.
     result = Valuation.run_dcf(base)
-    assert_equal 793.4, result[:pv_explicit]
-    assert_equal 3006.5, result[:terminal_value]
-    assert_equal 1957.9, result[:pv_terminal]
+    assert_equal 820.4, result[:pv_explicit]
+    assert_equal 2806.9, result[:terminal_value]
+    assert_equal 1828.0, result[:pv_terminal]
     assert_equal "Gordon growth at 2.0%", result[:terminal_method]
-    assert_equal 0.7116, result[:terminal_share_of_ev]
-    assert_equal 2751.3, result[:enterprise_value]
+    assert_equal 4.5, result[:terminal_discount_period]
+    assert_equal 0.6902, result[:terminal_share_of_ev]
+    assert_equal 2648.3, result[:enterprise_value]
     assert_equal 200.0, result[:net_debt]
-    assert_equal 2551.3, result[:equity_value]
-    assert_equal 25.51, result[:value_per_share]
-    assert_equal 9.85, result[:implied_ev_ebitda]
+    assert_equal 0.0, result[:other_claims]
+    assert_equal 2448.3, result[:equity_value]
+    assert_equal 24.48, result[:value_per_share]
+    assert_equal 9.48, result[:implied_ev_ebitda]
+    assert_equal 7.78, result[:implied_exit_multiple]
+    assert_equal 0.02, result[:implied_terminal_growth], "a Gordon value implies its own growth back"
+    assert_nil result[:bridge_note]
     assert_equal base.to_h, result[:assumptions]
     first = result[:projections].first
     assert_equal({ year: 2027, revenue: 1100.0, growth: 0.1, ebitda: 279.4, ebitda_margin: 0.254, ebit: 224.4,
-                   taxes: 56.1, dep_amort: 55.0, capex: 44.0, nwc_change: 11.0, fcf: 168.3,
-                   discount_factor: 0.9535, pv_fcf: 160.5 }, first)
+                   taxes: 56.1, dep_amort: 55.0, capex: 44.0, nwc_change: 1.0, fcf_full_year: 178.3,
+                   period_fraction: 1.0, fcf: 178.3, discount_period: 0.5, discount_factor: 0.9535, pv_fcf: 170.0 }, first)
+    terminal = result[:terminal_year]
+    assert_equal 2032, terminal[:year]
+    assert_equal true, terminal[:capex_floored_at_da], "4% capex is below 5% D&A, so the terminal year carries D&A"
+    assert_equal terminal[:dep_amort], terminal[:capex]
+    assert_in_delta terminal[:ebit] - terminal[:taxes] + terminal[:dep_amort] - terminal[:capex] - terminal[:nwc_change], terminal[:fcf], 0.06
+  end
+
+  test "working capital follows the change in revenue, not its level" do
+    flat = Valuation.run_dcf(base(revenue_growth: 0.0, terminal_growth: 0.0))
+    assert_equal [0.0] * 5, flat[:projections].map { |row| row[:nwc_change] }
+    assert_equal 0.0, flat[:terminal_year][:nwc_change]
+    shrinking = Valuation.run_dcf(base(revenue_growth: -0.05, terminal_growth: 0.0))
+    assert_operator shrinking[:projections].first[:nwc_change], :<, 0, "a revenue decline releases working capital"
+  end
+
+  test "an exit-multiple terminal value is discounted from year N even under the mid-year convention" do
+    result = Valuation.run_dcf(base(exit_multiple: 12.0, mid_year_convention: true))
+    assert_equal 5.0, result[:terminal_discount_period]
+    assert_in_delta result[:terminal_value] / 1.1**5, result[:pv_terminal], 0.5
+    gordon = Valuation.run_dcf(base(mid_year_convention: true))
+    assert_equal 4.5, gordon[:terminal_discount_period], "a perpetuity of mid-year flows sits half a year earlier"
+    assert_in_delta 0.0481, result[:implied_terminal_growth], 1e-4
+  end
+
+  test "a stub period counts only the remainder of the first year and shifts every discount" do
+    result = Valuation.run_dcf(base(stub_fraction: 0.5))
+    first, second = result[:projections]
+    assert_equal 0.5, first[:period_fraction]
+    assert_in_delta first[:fcf_full_year] / 2, first[:fcf], 0.06
+    assert_equal 0.25, first[:discount_period]
+    assert_equal 1.0, second[:discount_period]
+    assert_equal 4.0, result[:terminal_discount_period]
+    # Standing half a year later: half the first year's cash is gone, but every
+    # remaining flow and the terminal value are discounted half a year less.
+    whole = Valuation.run_dcf(base)
+    assert_operator result[:pv_terminal], :>, whole[:pv_terminal]
+    assert_in_delta whole[:pv_terminal] * 1.1**0.5, result[:pv_terminal], 0.5
+    assert_raises(ArgumentError) { Valuation.run_dcf(base(stub_fraction: 0.0)) }
+    assert_raises(ArgumentError) { Valuation.run_dcf(base(stub_fraction: 1.5)) }
+  end
+
+  test "unknown net debt gives an enterprise value and no equity bridge" do
+    result = Valuation.run_dcf(base(net_debt: nil))
+    assert_equal 2648.3, result[:enterprise_value]
+    assert_nil result[:net_debt]
+    assert_nil result[:equity_value]
+    assert_nil result[:value_per_share]
+    assert_includes result[:bridge_note], "Net debt unknown"
+  end
+
+  test "other claims are deducted with net debt" do
+    result = Valuation.run_dcf(base(other_claims: 100.0))
+    assert_equal 2348.3, result[:equity_value]
+    assert_equal 23.48, result[:value_per_share]
+  end
+
+  test "the terminal capex floor can be switched off" do
+    result = Valuation.run_dcf(base(terminal_capex_floor: false))
+    assert_equal false, result[:terminal_year][:capex_floored_at_da]
+    assert_operator result[:terminal_year][:capex], :<, result[:terminal_year][:dep_amort]
+    assert_operator result[:value_per_share], :>, Valuation.run_dcf(base)[:value_per_share]
   end
 
   test "first year revenue applies growth" do
@@ -503,9 +586,12 @@ class ValuationDcfTest < ActiveSupport::TestCase
     assert_operator growths.last, :>=, 0.02
   end
 
-  test "growth never fades below terminal growth" do
-    growths = Valuation.run_dcf(base(growth_fade: 0.9, years: 4))[:projections].map { |row| row[:growth] }
-    assert_equal [0.1, 0.02, 0.02, 0.02], growths
+  test "growth interpolates linearly from the first year to the terminal rate, whatever its sign" do
+    assert_equal [0.1, 0.08, 0.06, 0.04, 0.02], Valuation.run_dcf(base)[:projections].map { |row| row[:growth] }
+    # The reference flipped a negative first year straight to the terminal rate in year 2.
+    negative = Valuation.run_dcf(base(revenue_growth: -0.03, terminal_growth: 0.025))[:projections].map { |row| row[:growth] }
+    assert_equal [-0.03, -0.0163, -0.0025, 0.0113, 0.025], negative
+    assert_equal [0.1], Valuation.run_dcf(base(years: 1))[:projections].map { |row| row[:growth] }
   end
 
   test "higher wacc lowers value" do
@@ -529,7 +615,7 @@ class ValuationDcfTest < ActiveSupport::TestCase
     mid = Valuation.run_dcf(base(mid_year_convention: true))[:value_per_share]
     year_end = Valuation.run_dcf(base(mid_year_convention: false))[:value_per_share]
     assert_operator mid, :>, year_end
-    assert_equal 24.23, year_end
+    assert_equal 23.25, year_end
   end
 
   test "terminal growth above wacc is rejected" do
@@ -598,9 +684,9 @@ class ValuationDcfTest < ActiveSupport::TestCase
     sensitivity = Valuation.dcf_sensitivity(base)
     assert_equal [0.085, 0.0925, 0.1, 0.1075, 0.115], sensitivity[:wacc_axis]
     assert_equal [0.01, 0.015, 0.02, 0.025, 0.03], sensitivity[:terminal_axis]
-    assert_equal 19.57, sensitivity[:min]
-    assert_equal 36.8, sensitivity[:max]
-    assert_equal 25.51, sensitivity[:grid][2][2]
+    assert_equal 18.54, sensitivity[:min]
+    assert_equal 35.8, sensitivity[:max]
+    assert_equal 24.48, sensitivity[:grid][2][2]
   end
 
   test "sensitivity blanks cells where growth reaches wacc" do
@@ -662,20 +748,46 @@ class ValuationFootballFieldTest < ActiveSupport::TestCase
     assert_equal [42.59, 56.34], [precedent[:low], precedent[:high]]
     assert_equal "16.93x–22.12x on FY2026 EBITDA (6 deals)", precedent[:basis]
     dcf = by_method["DCF"]
-    assert_equal [30.45, 45.85], [dcf[:low], dcf[:high]]
-    assert_equal "WACC 9.92% ±100bps, terminal growth 2.50% ±50bps", dcf[:basis]
-    assert_equal({ base_case: 36.6 }, dcf[:detail])
+    assert_equal [27.27, 41.2], [dcf[:low], dcf[:high]]
+    assert_equal "WACC 10.02% ±100bps, terminal growth 2.50% ±50bps", dcf[:basis]
+    assert_equal({ base_case: @field[:dcf][:value_per_share] }, dcf[:detail])
+    assert_equal 32.85, @field[:dcf][:value_per_share]
+  end
+
+  test "reference bars and a revenue multiple on a margin outlier stay out of the conclusion" do
+    by_method = @field[:ranges].to_h { |row| [row[:method], row] }
+    week = by_method["52-week trading range"]
+    assert_equal false, week[:in_conclusion]
+    assert_equal true, week[:reference]
+    revenue = by_method["Trading comps — EV/Revenue"]
+    assert_equal false, revenue[:in_conclusion]
+    assert_match(/outside the peer interquartile range/, revenue[:note])
+    assert @field[:ranges].reject { |r| r == week || r == revenue }.all? { |r| r[:in_conclusion] }
+    assert_equal ["Trading comps — EV/EBITDA", "Precedent transactions — EV/EBITDA", "DCF"], @field[:concluded_range][:methods]
+  end
+
+  test "the WACC is built from its parts and shown with the field" do
+    build = @field[:wacc]
+    assert_equal 1.21, build[:beta]
+    assert_equal false, build[:beta_assumed]
+    assert_in_delta 0.0425 + 1.21 * 0.05, build[:cost_of_equity], 1e-4
+    assert_in_delta 0.06 * (1 - 0.23), build[:after_tax_cost_of_debt], 1e-4
+    assert_in_delta 410.0 / (8026.2 + 410.0), build[:weight_debt], 1e-4
+    assert_equal 0.1002, build[:wacc]
+    assert_equal build[:wacc], @field[:dcf][:assumptions][:wacc]
+    assert build[:notes].any? { |n| n.include?("house defaults") }
   end
 
   test "target block and reference price come from the market data" do
     assert_equal({ ticker: "NVG", name: "NovaGrid Systems", share_price: 44.1, shares_diluted: 182.0,
-                   net_debt: 410.0, currency: "USD", market_cap: 8026.2, enterprise_value: 8436.2 },
+                   net_debt: 410.0, other_claims: 0.0, currency: "USD", market_cap: 8026.2, enterprise_value: 8436.2,
+                   basis_label: "FY2026", price_date: Date.new(2026, 10, 9), balance_sheet_date: nil },
                  @field[:target])
     assert_equal 44.1, @field[:reference_price]
     assert_equal 6, @field[:comps][:rows].size
     assert_equal 6, @field[:precedents][:rows].size
-    assert_equal 36.6, @field[:dcf][:value_per_share]
-    assert_equal [27.51, 54.85], [@field[:sensitivity][:min], @field[:sensitivity][:max]]
+    assert_equal 32.85, @field[:dcf][:value_per_share]
+    assert_equal [24.51, 49.45], [@field[:sensitivity][:min], @field[:sensitivity][:max]]
   end
 
   test "axis pads the extremes by ten and five percent" do
@@ -687,19 +799,18 @@ class ValuationFootballFieldTest < ActiveSupport::TestCase
 
   test "concluded range sits inside the methodologies" do
     concluded = @field[:concluded_range]
-    lows = @field[:ranges].map { |row| row[:low] }
-    highs = @field[:ranges].map { |row| row[:high] }
+    lows = @field[:ranges].select { |r| r[:in_conclusion] }.map { |row| row[:low] }
+    highs = @field[:ranges].select { |r| r[:in_conclusion] }.map { |row| row[:high] }
     assert_operator concluded[:low], :>=, lows.min
     assert_operator concluded[:high], :<=, highs.max
     assert_operator concluded[:low], :<, concluded[:high]
   end
 
-  test "concluded range is the median low to the median high" do
-    lows = @field[:ranges].map { |row| row[:low] }
-    highs = @field[:ranges].map { |row| row[:high] }
-    assert_in_delta Valuation.percentile(lows, 0.5), @field[:concluded_range][:low], 0.006
-    assert_in_delta Valuation.percentile(highs, 0.5), @field[:concluded_range][:high], 0.006
-    assert_equal({ low: 30.45, high: 45.85 }, @field[:concluded_range])
+  test "concluded range is the median low to the median high of the valuation methods" do
+    counted = @field[:ranges].select { |r| r[:in_conclusion] }
+    assert_in_delta Valuation.percentile(counted.map { |r| r[:low] }, 0.5), @field[:concluded_range][:low], 0.006
+    assert_in_delta Valuation.percentile(counted.map { |r| r[:high] }, 0.5), @field[:concluded_range][:high], 0.006
+    assert_equal({ low: 30.2, high: 45.11, methods: counted.map { |r| r[:method] } }, @field[:concluded_range])
   end
 
   test "dcf bar uses the narrow band while the sensitivity shows the wide grid" do
@@ -725,7 +836,7 @@ class ValuationFootballFieldTest < ActiveSupport::TestCase
     assert_operator tight_dcf[:mid], :<, base_dcf[:mid]
     assert_equal "WACC 14.00% ±100bps, terminal growth 2.50% ±50bps", tight_dcf[:basis]
     assert_equal 0.14, tighter[:dcf][:assumptions][:wacc]
-    assert_equal [20.04, 26.07], [tight_dcf[:low], tight_dcf[:high]]
+    assert_equal [18.43, 24.19], [tight_dcf[:low], tight_dcf[:high]]
   end
 
   test "unknown target" do
@@ -738,7 +849,10 @@ class ValuationFootballFieldTest < ActiveSupport::TestCase
     assert_in_delta metrics[:latest_actual][:revenue], assumptions.base_revenue, 0.05
     assert_in_delta metrics[:net_debt], assumptions.net_debt, 0.05
     assert_operator assumptions.wacc, :>, 0
-    assert_equal 0.0992, assumptions.wacc
+    assert_equal 0.1002, assumptions.wacc
+    assert_equal 1.0, assumptions.stub_fraction, "FY2027 has not started at the 9 October 2026 price date"
+    assert_equal Date.new(2026, 10, 9), assumptions.valuation_date
+    assert_equal 0.0, assumptions.other_claims
     assert_equal 0.168, assumptions.revenue_growth
     assert_equal 0.262, assumptions.ebitda_margin
     assert_equal 0.052, assumptions.da_pct_revenue
@@ -766,10 +880,9 @@ class ValuationFootballFieldWithoutPrecedentsTest < ActiveSupport::TestCase
   end
 
   test "concluded range still comes from the remaining bars" do
-    lows = @field[:ranges].map { |row| row[:low] }
-    highs = @field[:ranges].map { |row| row[:high] }
-    assert_in_delta Valuation.percentile(lows, 0.5), @field[:concluded_range][:low], 0.006
-    assert_in_delta Valuation.percentile(highs, 0.5), @field[:concluded_range][:high], 0.006
+    counted = @field[:ranges].select { |r| r[:in_conclusion] }
+    assert_in_delta Valuation.percentile(counted.map { |r| r[:low] }, 0.5), @field[:concluded_range][:low], 0.006
+    assert_in_delta Valuation.percentile(counted.map { |r| r[:high] }, 0.5), @field[:concluded_range][:high], 0.006
   end
 
   test "a target without a 52-week range drops that bar too" do
@@ -832,10 +945,18 @@ class ValuationDefaultAssumptionsTest < ActiveSupport::TestCase
     assert_in_delta 0.10, Valuation.default_assumptions(metrics_with([year(2024, revenue: 0.0), year(2025, revenue: 100.0)])).revenue_growth, 1e-9
   end
 
-  test "beta scales the wacc two points per unit" do
-    assert_in_delta 0.095, Valuation.default_assumptions(metrics_with([year(2025, revenue: 100.0)], beta: 1.0)).wacc, 1e-9
-    assert_in_delta 0.105, Valuation.default_assumptions(metrics_with([year(2025, revenue: 100.0)], beta: 1.5)).wacc, 1e-9
-    assert_in_delta 0.095, Valuation.default_assumptions(metrics_with([year(2025, revenue: 100.0)], beta: nil)).wacc, 1e-9
+  test "the WACC is a CAPM build: beta moves the cost of equity, debt is weighted at its after-tax cost" do
+    # No market cap in these metrics: all-equity, so WACC = rf + beta x ERP.
+    assert_in_delta 0.0925, Valuation.default_assumptions(metrics_with([year(2025, revenue: 100.0)], beta: 1.0)).wacc, 1e-9
+    assert_in_delta 0.1175, Valuation.default_assumptions(metrics_with([year(2025, revenue: 100.0)], beta: 1.5)).wacc, 1e-9
+    unknown = Valuation.wacc_build(metrics_with([year(2025, revenue: 100.0)], beta: nil))
+    assert_in_delta 0.0925, unknown[:wacc], 1e-9
+    assert unknown[:beta_assumed]
+    assert unknown[:notes].any? { |n| n.include?("Beta not loaded") }
+    levered = Valuation.wacc_build(metrics_with([year(2025, revenue: 100.0)], beta: 1.0).merge(market_cap: 900.0, net_debt: 100.0))
+    assert_in_delta 0.1, levered[:weight_debt], 1e-9
+    assert_in_delta 0.9 * 0.0925 + 0.1 * 0.06 * 0.77, levered[:wacc], 1e-4
+    assert_equal 0.23, levered[:tax_rate]
   end
 
   test "capital structure and start year" do
@@ -847,7 +968,28 @@ class ValuationDefaultAssumptionsTest < ActiveSupport::TestCase
     assert_equal 0.2, a.ebitda_margin
     assert_equal 0.05, a.da_pct_revenue
     assert_equal 0.04, a.capex_pct_revenue
-    assert_equal 1.0, Valuation.default_assumptions(metrics_with([year(2025, revenue: 100.0)], shares: 0.0)).shares_diluted
+    assert_nil Valuation.default_assumptions(metrics_with([year(2025, revenue: 100.0)], shares: 0.0)).shares_diluted,
+               "an unknown share count stays unknown instead of becoming one share"
+    assert_nil Valuation.default_assumptions(metrics_with([year(2025, revenue: 100.0)], net_debt: nil)).net_debt
+  end
+
+  test "the stub period runs from the price date to the end of the first projected year" do
+    metrics = metrics_with([year(2025, revenue: 100.0, period_end: Date.new(2025, 12, 31))]).merge(as_of: Date.new(2026, 10, 12))
+    a = Valuation.default_assumptions(metrics)
+    assert_equal 2026, a.start_year
+    assert_in_delta 80 / 365.25, a.stub_fraction, 1e-3, "80 days of FY2026 remain on 12 October 2026"
+    assert_equal Date.new(2026, 10, 12), a.valuation_date
+    whole = Valuation.default_assumptions(metrics.merge(as_of: Date.new(2026, 1, 1)))
+    assert_in_delta 364 / 365.25, whole.stub_fraction, 1e-3
+    assert_equal 1.0, Valuation.default_assumptions(metrics.merge(as_of: Date.new(2025, 6, 1))).stub_fraction, "capped at a whole year"
+  end
+
+  test "margin, D&A and capex intensity come from the LTM row when there is one" do
+    ltm = year(2025, revenue: 110.0, period_type: "LTM", period_end: Date.new(2026, 6, 30)).merge(ebitda: 33.0)
+    a = Valuation.default_assumptions(metrics_with([year(2024, revenue: 90.0), year(2025, revenue: 100.0), ltm]))
+    assert_equal 100.0, a.base_revenue, "the projection still starts from the last fiscal year"
+    assert_equal 0.3, a.ebitda_margin
+    assert_in_delta 100.0 / 90.0 - 1, a.revenue_growth, 1e-3
   end
 
   test "no history at all yields the generic defaults" do
@@ -888,5 +1030,14 @@ class ValuationUnknownNetDebtTest < ActiveSupport::TestCase
   test "an EV multiple cannot be bridged to a share price without net debt" do
     assert_nil Valuation.implied_from_multiple(10, 12, metric_value: 100, kind: "ev", net_debt: nil, shares: 10)
     refute_nil Valuation.implied_from_multiple(10, 12, metric_value: 2.0, kind: "equity", net_debt: nil, shares: 10)
+    assert_equal 8.0, Valuation.implied_from_multiple(10, 10, metric_value: 100, kind: "ev", net_debt: 100, shares: 100, other_claims: 100)[:low]
+  end
+
+  test "the football field for a target with unknown net debt has no DCF bar and no concluded range" do
+    field = Valuation.football_field("NODEBT", [])
+    assert_empty field[:ranges].map { |r| r[:method] } - ["52-week trading range"]
+    assert_includes field[:dcf_note], "Net debt unknown"
+    assert_nil field[:dcf][:value_per_share]
+    assert_equal({ low: nil, high: nil, methods: [] }, field[:concluded_range])
   end
 end
