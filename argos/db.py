@@ -38,7 +38,10 @@ CREATE TABLE IF NOT EXISTS financials (
     id            INTEGER PRIMARY KEY,
     company_id    INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
     fiscal_year   INTEGER NOT NULL,
+    period_type   TEXT NOT NULL DEFAULT 'FY',
+    period_end    TEXT,
     is_estimate   INTEGER DEFAULT 0,
+    estimate_source TEXT,
     revenue       REAL,
     ebitda        REAL,
     ebit          REAL,
@@ -48,7 +51,7 @@ CREATE TABLE IF NOT EXISTS financials (
     capex         REAL,
     nwc_change    REAL,
     tax_rate      REAL,
-    UNIQUE (company_id, fiscal_year)
+    UNIQUE (company_id, fiscal_year, period_type)
 );
 
 CREATE TABLE IF NOT EXISTS market_data (
@@ -56,7 +59,13 @@ CREATE TABLE IF NOT EXISTS market_data (
     as_of           TEXT,
     share_price     REAL,
     shares_diluted  REAL,
+    shares_basic    REAL,
     net_debt        REAL,
+    net_debt_as_of  TEXT,
+    balance_sheet_form TEXT,
+    minority_interest REAL,
+    preferred_equity REAL,
+    debt_note       TEXT,
     week52_low      REAL,
     week52_high     REAL,
     beta            REAL
@@ -208,21 +217,127 @@ CREATE INDEX IF NOT EXISTS idx_evidence_book ON evidence(pitchbook_id);
 """
 
 
+# Columns added after the first release (docs/AUDIT.md, docs/RAILS_PORT.md
+# items 11, 12 and 15). ``CREATE TABLE IF NOT EXISTS`` leaves a database made
+# from the old schema untouched, so :func:`migrate` adds these one by one.
+ADDED_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
+    "financials": (
+        ("period_type", "TEXT NOT NULL DEFAULT 'FY'"),
+        ("period_end", "TEXT"),
+        ("estimate_source", "TEXT"),
+    ),
+    "market_data": (
+        ("shares_basic", "REAL"),
+        ("net_debt_as_of", "TEXT"),
+        ("balance_sheet_form", "TEXT"),
+        ("minority_interest", "REAL"),
+        ("preferred_equity", "REAL"),
+        ("debt_note", "TEXT"),
+    ),
+}
+FINANCIALS_KEY = ("company_id", "fiscal_year", "period_type")
+
+
+def _financials_ddl() -> str:
+    """The current ``CREATE TABLE financials`` statement, taken from SCHEMA.
+
+    Read from the schema text rather than restated, so a rebuilt table can
+    never drift from a freshly created one.
+    """
+    start = SCHEMA.index("CREATE TABLE IF NOT EXISTS financials (")
+    return SCHEMA[start:SCHEMA.index(");", start) + 2]
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    return [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+
+
+def _unique_keys(conn: sqlite3.Connection, table: str) -> list[tuple[str, ...]]:
+    """Column tuples of every UNIQUE index on a table (inline or created)."""
+    keys = []
+    for row in conn.execute(f"PRAGMA index_list({table})").fetchall():
+        if row[2]:  # "unique"
+            info = conn.execute(f"PRAGMA index_info('{row[1]}')").fetchall()
+            keys.append(tuple(col[2] for col in sorted(info, key=lambda col: col[0])))
+    return keys
+
+
+def migrate(conn: sqlite3.Connection) -> sqlite3.Connection:
+    """Bring a database created from an older schema up to date. Idempotent.
+
+    Missing columns are added with ``ALTER TABLE ADD COLUMN``. The financials
+    key widened from (company_id, fiscal_year) to (company_id, fiscal_year,
+    period_type) so an LTM row can sit beside the fiscal year it extends; the
+    old key was an inline UNIQUE, which SQLite cannot drop, so a table carrying
+    it is rebuilt once — copy, drop, recreate, restore — in one transaction, so
+    a failure leaves the old table exactly as it was. Tables that do not exist
+    yet are skipped: :func:`init_db` creates them in their current form.
+    """
+    if conn.in_transaction:
+        conn.commit()
+    for table, additions in ADDED_COLUMNS.items():
+        existing = _columns(conn, table)
+        if not existing:
+            continue
+        for name, decl in additions:
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+    conn.commit()
+
+    if not _columns(conn, "financials"):
+        return conn
+    keys = _unique_keys(conn, "financials")
+    if ("company_id", "fiscal_year") in keys:
+        _rebuild_financials(conn)
+    elif FINANCIALS_KEY not in _unique_keys(conn, "financials"):
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_financials_period "
+            "ON financials(company_id, fiscal_year, period_type)"
+        )
+        conn.commit()
+    return conn
+
+
+def _rebuild_financials(conn: sqlite3.Connection) -> None:
+    """Recreate financials under the current DDL, keeping every row and id."""
+    old_columns = _columns(conn, "financials")
+    conn.execute("BEGIN")
+    try:
+        conn.execute(_financials_ddl().replace(
+            "CREATE TABLE IF NOT EXISTS financials (", "CREATE TABLE financials_rebuild (", 1))
+        shared = [name for name in _columns(conn, "financials_rebuild") if name in old_columns]
+        cols = ", ".join(shared)
+        conn.execute(f"INSERT INTO financials_rebuild ({cols}) SELECT {cols} FROM financials")
+        conn.execute("DROP TABLE financials")
+        conn.execute("ALTER TABLE financials_rebuild RENAME TO financials")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def connect(db_path: Path | str | None = None) -> sqlite3.Connection:
-    """Open a connection with row access by name and foreign keys enforced."""
+    """Open a connection with row access by name and foreign keys enforced.
+
+    An existing database is migrated on open (a no-op when it is current or
+    empty), so a reader that never calls :func:`init_db` still sees the
+    current columns.
+    """
     path = Path(db_path) if db_path else CONFIG.db_path
     if str(path) != ":memory:":
         path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    migrate(conn)
     return conn
 
 
 def init_db(conn: sqlite3.Connection) -> sqlite3.Connection:
-    """Create every table/index/trigger. Safe to call repeatedly."""
+    """Create every table/index/trigger and migrate old ones. Safe to call repeatedly."""
     conn.executescript(SCHEMA)
     conn.commit()
+    migrate(conn)
     return conn
 
 

@@ -33,6 +33,14 @@ class Config:
     default_terminal_growth: float = 0.025
     default_tax_rate: float = 0.23
     projection_years: int = 5
+    # Cost-of-capital build inputs (valuation.wacc_build). House defaults,
+    # printed with every DCF so a reader sees them and a banker overrides them
+    # per deck; they are not market observations as of the valuation date.
+    # default_wacc above is now only the fallback for a bare DCFAssumptions().
+    risk_free_rate: float = 0.0425
+    equity_risk_premium: float = 0.05
+    debt_spread: float = 0.0175         # pre-tax cost of debt = risk-free + spread
+    default_beta: float = 1.0           # when no beta is loaded: the market's
 
     def ensure_dirs(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

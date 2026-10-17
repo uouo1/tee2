@@ -26,7 +26,7 @@ from ..db import insert, query_one, upsert_company
 from ..ingest import ingest_many
 from .htmltext import html_to_text
 from .http import fetch, fetch_json
-from .market import fetch_quote
+from .market import fetch_estimates, fetch_quote
 
 TICKER_INDEX_URL = "https://www.sec.gov/files/company_tickers.json"
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
@@ -66,6 +66,7 @@ INSTANT_TAGS: dict[str, tuple[str, ...]] = {
     "cash": (
         "CashAndCashEquivalentsAtCarryingValue",
         "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+        "Cash",
     ),
     "short_term_investments": (
         "ShortTermInvestments", "MarketableSecuritiesCurrent",
@@ -78,11 +79,23 @@ INSTANT_TAGS: dict[str, tuple[str, ...]] = {
     "debt_noncurrent": (
         "LongTermDebtNoncurrent", "LongTermDebtAndCapitalLeaseObligations",
     ),
+    # Borrowings as one line, for filers that tag neither split line.
+    "debt_total": (
+        "LongTermDebt", "DebtLongtermAndShorttermCombinedAmount",
+        "DebtAndCapitalLeaseObligations", "DebtInstrumentCarryingAmount",
+    ),
+    "minority_interest": ("MinorityInterest",),
+    "preferred_equity": ("PreferredStockValue", "PreferredStockCarryingAmount"),
     "assets_current": ("AssetsCurrent",),
     "liabilities_current": ("LiabilitiesCurrent",),
 }
 
 FORM_DOC_TYPES = {"10-K": "filing", "10-Q": "filing", "8-K": "press-release"}
+ANNUAL_FORMS = ("10-K", "10-K/A")
+QUARTERLY_FORMS = ("10-Q", "10-Q/A")
+BALANCE_FORMS = ANNUAL_FORMS + QUARTERLY_FORMS
+# Days in a year-to-date span on a Q1, Q2 or Q3 10-Q.
+YTD_SPANS: dict[int, tuple[int, int]] = {1: (80, 100), 2: (170, 190), 3: (260, 280)}
 MAX_FILING_CHARS = 320_000
 
 
@@ -110,60 +123,171 @@ def fetch_facts(cik: str) -> dict[str, Any]:
 # ------------------------------------------------------------------- facts
 
 
-def _fiscal_year(end: str) -> int:
+def _fiscal_year(end: str | date) -> int:
     """Fiscal year for a period end date.
 
     52/53-week filers end their year in the first days of January; Trimble's
     "fiscal 2025" ends 2 January 2026. Labelling by calendar year of the end
     date would call that FY2026, so early-January ends belong to the prior year.
     """
-    ended = date.fromisoformat(end)
+    ended = end if isinstance(end, date) else date.fromisoformat(end)
     return ended.year - 1 if (ended.month == 1 and ended.day <= 15) else ended.year
 
 
-def _duration_values(facts: dict[str, Any], names: Sequence[str], *, unit: str = "USD") -> dict[int, float]:
-    """Annual values by fiscal year for a duration concept (P&L, cash flow)."""
-    us_gaap = facts.get("facts", {}).get("us-gaap", {})
-    out: dict[int, tuple[str, float]] = {}
+def _us_gaap(facts: dict[str, Any]) -> dict[str, Any]:
+    return (facts.get("facts") or {}).get("us-gaap") or {}
+
+
+def duration_entries(
+    facts: dict[str, Any], names: Sequence[str], *, unit: str = "USD"
+) -> dict[int, dict[str, Any]]:
+    """Annual observations by fiscal year for a duration concept.
+
+    Returns ``{year: {"value", "period_end" (date), "filed", "tag"}}``.
+
+    Tags are resolved PER YEAR in preference order: an earlier tag's value for
+    a year wins, a later tag fills the years the earlier ones lack. Resolving
+    once per company ("first tag with any data") lost every year after a tag
+    switch and, for Xylem, dropped the whole current-debt line (audit finding,
+    docs/RAILS_PORT.md item 11). Within a tag the most recently filed value
+    wins: restatements.
+    """
+    us_gaap = _us_gaap(facts)
+    out: dict[int, dict[str, Any]] = {}
     for name in names:
-        units = us_gaap.get(name, {}).get("units", {}).get(unit, [])
-        for entry in units:
-            if entry.get("form") not in ("10-K", "10-K/A") or entry.get("fp") != "FY":
+        per_tag: dict[int, dict[str, Any]] = {}
+        for entry in (us_gaap.get(name) or {}).get("units", {}).get(unit, []) or []:
+            if entry.get("form") not in ANNUAL_FORMS or entry.get("fp") != "FY":
                 continue
             start, end = entry.get("start"), entry.get("end")
             if not start or not end:
                 continue
-            span = (date.fromisoformat(end) - date.fromisoformat(start)).days
+            finish = date.fromisoformat(end)
+            span = (finish - date.fromisoformat(start)).days
             if not 330 <= span <= 400:  # a full year, not a quarter or a stub
                 continue
-            year = _fiscal_year(end)
-            filed = entry.get("filed", "")
-            # Later filings restate earlier ones; keep the most recently filed.
-            if year not in out or filed > out[year][0]:
-                out[year] = (filed, float(entry["val"]))
-        if out:
-            break  # first tag that yields data wins the preference order
-    return {year: value for year, (_, value) in out.items()}
+            year = _fiscal_year(finish)
+            filed = str(entry.get("filed") or "")
+            if year not in per_tag or filed > per_tag[year]["filed"]:
+                per_tag[year] = {"value": float(entry["val"]), "period_end": finish, "filed": filed, "tag": name}
+        for year, row in per_tag.items():
+            out.setdefault(year, row)
+    return out
 
 
-def _instant_values(facts: dict[str, Any], names: Sequence[str]) -> dict[int, float]:
-    """Year-end values for a balance-sheet concept."""
-    us_gaap = facts.get("facts", {}).get("us-gaap", {})
-    out: dict[int, tuple[str, float]] = {}
+def duration_values(facts: dict[str, Any], names: Sequence[str], *, unit: str = "USD") -> dict[int, float]:
+    """Annual values by fiscal year for a duration concept (P&L, cash flow)."""
+    return {year: row["value"] for year, row in duration_entries(facts, names, unit=unit).items()}
+
+
+def instant_entries(
+    facts: dict[str, Any], names: Sequence[str], *,
+    forms: Sequence[str] = ("10-K", "10-K/A"), fiscal_year_only: bool = True,
+) -> dict[date, dict[str, Any]]:
+    """Balance-sheet observations by date for an instant concept.
+
+    Returns ``{date: {"value", "filed", "form", "tag"}}`` from the given forms,
+    with the same per-date tag preference and latest-filed rule as
+    :func:`duration_entries`.
+    """
+    us_gaap = _us_gaap(facts)
+    out: dict[date, dict[str, Any]] = {}
     for name in names:
-        for entry in us_gaap.get(name, {}).get("units", {}).get("USD", []):
-            if entry.get("form") not in ("10-K", "10-K/A") or entry.get("fp") != "FY":
+        per_tag: dict[date, dict[str, Any]] = {}
+        for entry in (us_gaap.get(name) or {}).get("units", {}).get("USD", []) or []:
+            if entry.get("form") not in forms:
+                continue
+            if fiscal_year_only and entry.get("fp") != "FY":
                 continue
             end = entry.get("end")
             if not end:
                 continue
-            year = _fiscal_year(end)
-            filed = entry.get("filed", "")
-            if year not in out or filed > out[year][0]:
-                out[year] = (filed, float(entry["val"]))
-        if out:
-            break
-    return {year: value for year, (_, value) in out.items()}
+            when = date.fromisoformat(end)
+            filed = str(entry.get("filed") or "")
+            if when not in per_tag or filed > per_tag[when]["filed"]:
+                per_tag[when] = {"value": float(entry["val"]), "filed": filed, "form": entry.get("form"), "tag": name}
+        for when, row in per_tag.items():
+            out.setdefault(when, row)
+    return out
+
+
+def instant_values(facts: dict[str, Any], names: Sequence[str]) -> dict[int, float]:
+    """Year-end values for a balance-sheet concept (fiscal-year 10-K instants).
+
+    When a fiscal year carries several FY instants, the latest date is the
+    year end; the others are comparatives or opening balances.
+    """
+    dated: dict[int, tuple[date, float]] = {}
+    for when, row in instant_entries(facts, names).items():
+        year = _fiscal_year(when)
+        if year not in dated or when > dated[year][0]:
+            dated[year] = (when, row["value"])
+    return {year: value for year, (_, value) in dated.items()}
+
+
+# Kept for callers of the old private names; same per-year rules.
+_duration_values = duration_values
+_instant_values = instant_values
+
+
+def latest_balance_sheet(facts: dict[str, Any]) -> dict[str, Any] | None:
+    """The most recent balance sheet in the facts, 10-K or 10-Q, in millions.
+
+    Every component is read at the one date of the newest cash figure. This is
+    what an EV bridge needs: bridging a current price through the last fiscal
+    year end missed, for Itron, a $600m convertible and a buyback filed since
+    (audit finding, docs/RAILS_PORT.md item 11).
+
+    Gross debt is the current plus non-current lines when either is tagged,
+    else a total-debt tag; when no debt line exists at that date it is taken as
+    zero WITH ``debt_note`` saying so, because a filer with no debt tags at all
+    is usually debt-free but not always. Non-controlling interest and preferred
+    equity are read for the bridge (zero when absent). ``as_of`` is an ISO date.
+    """
+    cash_by_date = instant_entries(facts, INSTANT_TAGS["cash"], forms=BALANCE_FORMS, fiscal_year_only=False)
+    if not cash_by_date:
+        return None
+    as_of = max(cash_by_date)
+
+    def at(key: str) -> float | None:
+        row = instant_entries(facts, INSTANT_TAGS[key], forms=BALANCE_FORMS, fiscal_year_only=False).get(as_of)
+        return row["value"] if row else None
+
+    cash = cash_by_date[as_of]["value"]
+    short_term_investments = at("short_term_investments")
+    if short_term_investments is None:
+        short_term_investments = 0.0
+    debt_current = at("debt_current")
+    debt_noncurrent = at("debt_noncurrent")
+    debt_total = at("debt_total")
+    debt_note = None
+    if debt_current is not None or debt_noncurrent is not None:
+        gross_debt = (debt_current or 0.0) + (debt_noncurrent or 0.0)
+    elif debt_total is not None:
+        gross_debt = debt_total
+    else:
+        debt_note = f"No debt line tagged at {as_of.isoformat()}; gross debt taken as zero."
+        gross_debt = 0.0
+    minority_interest = at("minority_interest")
+    preferred_equity = at("preferred_equity")
+
+    def millions(value: float | None) -> float | None:
+        return None if value is None else round(value / 1e6, 1)
+
+    return {
+        "as_of": as_of.isoformat(),
+        "form": cash_by_date[as_of]["form"],
+        "cash": millions(cash),
+        "short_term_investments": millions(short_term_investments),
+        "debt_current": millions(debt_current),
+        "debt_noncurrent": millions(debt_noncurrent),
+        "debt_total": millions(debt_total),
+        "gross_debt": millions(gross_debt),
+        "minority_interest": millions(minority_interest if minority_interest is not None else 0.0),
+        "preferred_equity": millions(preferred_equity if preferred_equity is not None else 0.0),
+        "net_debt": millions(gross_debt - cash - short_term_investments),
+        "debt_note": debt_note,
+    }
 
 
 def _cover_shares(facts: dict[str, Any]) -> float | None:
@@ -175,42 +299,90 @@ def _cover_shares(facts: dict[str, Any]) -> float | None:
     )
     if not entries:
         return None
-    latest = max(entries, key=lambda row: (row.get("end", ""), row.get("filed", "")))
+    latest = max(entries, key=lambda row: (str(row.get("end", "")), str(row.get("filed", ""))))
     return float(latest["val"])
 
 
-def shares_outstanding(facts: dict[str, Any]) -> float | None:
-    """Cover-page shares, else the latest annual weighted diluted count.
+def shares(facts: dict[str, Any]) -> dict[str, Any]:
+    """Diluted and basic share counts, in shares (not millions).
 
-    Multi-class filers (Watts Water, for one) report the cover-page count per
-    class as dimensional facts, which the companyfacts feed omits; the diluted
-    weighted average is the honest fallback for a per-share bridge.
+    Returns ``{"diluted", "basic", "basis", "fallback_reason"}``; ``basis``
+    ("weighted_diluted", "cover_page" or "none") says which count ``diluted``
+    really is.
+
+    ``diluted`` is the latest annual weighted-average diluted count: per-share
+    values divide by diluted shares, and using the cover-page count under a
+    "diluted" label understated them by ~6% for Itron (43.79m vs 46.32m).
+    ``basic`` is the cover-page count. Two guards an audit of 600 filers showed
+    were needed (docs/RAILS_PORT.md item 15): the weighted count must belong to
+    the latest fiscal year on file (a tag a filer stopped using left
+    LyondellBasell with a count from 2011), and it must be of the cover count's
+    order of magnitude (McDonald's tags the count in millions, which read as
+    716 shares). Either failure falls back to the cover page. Multi-class
+    filers report the cover count per class as dimensional facts, which the
+    companyfacts feed omits, so ``diluted`` then stands alone and ``basic``
+    stays None rather than borrowing it.
     """
     cover = _cover_shares(facts)
-    if cover:
-        return cover
-    diluted = _duration_values(facts, TAGS["diluted_shares"], unit="shares")
-    if diluted:
-        return diluted[max(diluted)]
-    return None
+    if cover == 0:
+        cover = None
+    diluted = duration_entries(facts, TAGS["diluted_shares"], unit="shares")
+    revenue_years = duration_values(facts, TAGS["revenue"])
+    latest_year = max(revenue_years) if revenue_years else None
+    year = max(diluted) if diluted else None
+    weighted = diluted[year]["value"] if year is not None else None
+    if weighted == 0:
+        weighted = None
+    reason = None
+    if weighted is not None and latest_year is not None and year < latest_year:
+        reason = f"diluted count is from FY{year}, revenue runs to FY{latest_year}"
+        weighted = None
+    elif weighted is not None and cover is not None and not 0.5 <= weighted / cover <= 2.0:
+        reason = f"diluted count {round(weighted)} is off-scale against the cover page {round(cover)}"
+        weighted = None
+    if weighted is not None:
+        basis = "weighted_diluted"
+    elif cover is not None:
+        basis = "cover_page"
+    else:
+        basis = "none"
+    return {
+        "diluted": weighted if weighted is not None else cover,
+        "basic": cover,
+        "basis": basis,
+        "fallback_reason": reason,
+    }
+
+
+def shares_outstanding(facts: dict[str, Any]) -> float | None:
+    """The share count a per-share bridge divides by: ``shares(facts)["diluted"]``.
+
+    Kept as a thin wrapper for older callers; the guards live in :func:`shares`.
+    """
+    return shares(facts)["diluted"]
 
 
 def build_financials(facts: dict[str, Any], *, years: int = 6) -> list[dict[str, Any]]:
-    """Annual income-statement and cash-flow rows, newest `years` fiscal years.
+    """Annual income-statement and cash-flow rows, newest `years` fiscal years,
+    followed by one trailing-twelve-month row when a 10-Q extends the last year.
 
-    Amounts are converted to millions to match the rest of the application.
+    Each row carries ``period_type`` ("FY" or "LTM") and ``period_end`` (ISO
+    date). The LTM row shares its fiscal_year with the year it extends (see
+    :func:`ltm_row`). Amounts are converted to millions to match the rest of
+    the application.
     """
-    series = {key: _duration_values(facts, names) for key, names in TAGS.items() if key != "eps"}
+    entries = {key: duration_entries(facts, names) for key, names in TAGS.items() if key != "eps"}
+    series = {key: {year: row["value"] for year, row in rows.items()} for key, rows in entries.items()}
     if not series["dep_amort"]:
         # Some filers (Badger Meter, for one) never tag a combined line.
-        depreciation = _duration_values(facts, ("Depreciation",))
-        amortisation = _duration_values(facts, ("AmortizationOfIntangibleAssets",))
+        depreciation = duration_values(facts, ("Depreciation",))
+        amortisation = duration_values(facts, ("AmortizationOfIntangibleAssets",))
         series["dep_amort"] = {
             year: depreciation.get(year, 0.0) + amortisation.get(year, 0.0)
             for year in set(depreciation) | set(amortisation)
         }
-    eps = _duration_values(facts, TAGS["eps"], unit="USD/shares")
-    balance = {key: _instant_values(facts, names) for key, names in INSTANT_TAGS.items()}
+    eps = duration_values(facts, TAGS["eps"], unit="USD/shares")
+    balance = {key: instant_values(facts, names) for key, names in INSTANT_TAGS.items()}
 
     available = sorted(series["revenue"])[-years:]
     rows: list[dict[str, Any]] = []
@@ -236,18 +408,148 @@ def build_financials(facts: dict[str, Any], *, years: int = 6) -> list[dict[str,
 
         rows.append({
             "fiscal_year": year,
+            "period_type": "FY",
+            "period_end": entries["revenue"][year]["period_end"].isoformat(),
             "is_estimate": 0,
             "revenue": round(revenue / 1e6, 1),
             "ebitda": round(ebitda / 1e6, 1) if ebitda is not None else None,
             "ebit": round(operating_income / 1e6, 1) if operating_income is not None else None,
-            "net_income": round(series["net_income"].get(year, 0.0) / 1e6, 1) if year in series["net_income"] else None,
+            "net_income": round(series["net_income"][year] / 1e6, 1) if year in series["net_income"] else None,
             "eps": round(eps[year], 2) if year in eps else None,
             "dep_amort": round(dep_amort / 1e6, 1) if dep_amort is not None else None,
             "capex": round(series["capex"][year] / 1e6, 1) if year in series["capex"] else None,
             "nwc_change": round(nwc_change, 1) if nwc_change is not None else None,
             "tax_rate": round(tax_rate, 4) if tax_rate is not None else None,
         })
+    ltm = ltm_row(facts, rows[-1]) if rows else None
+    if ltm:
+        rows.append(ltm)
     return rows
+
+
+def ltm_row(facts: dict[str, Any], fy_row: dict[str, Any]) -> dict[str, Any] | None:
+    """Trailing twelve months to the latest 10-Q after the last fiscal year.
+
+    Fiscal year + current year-to-date − prior-year year-to-date, per flow.
+    Bankers quote LTM (and NTM) multiples, not last-fiscal-year ones; storing
+    annual rows only left Itron's multiples on a year that had ended nine
+    months before the pricing date (audit finding, docs/RAILS_PORT.md item 12).
+
+    EPS is rolled the same way (an approximation when the share count moved).
+    D&A falls back to the fiscal-year figure when the quarterlies do not tag
+    it, since it barely moves within a year. Working capital is not rolled.
+    Returns None when no 10-Q extends the last fiscal year or the prior-year
+    comparable is missing.
+    """
+    fy_end = date.fromisoformat(str(fy_row["period_end"]))
+    revenue = latest_ytd(facts, TAGS["revenue"], after=fy_end)
+    if revenue is None or revenue["prior_value"] is None:
+        return None
+
+    quarter_end = revenue["period_end"]
+    ytd: dict[str, dict[str, Any] | None] = {"revenue": revenue}
+    for key in ("operating_income", "dep_amort", "net_income", "capex"):
+        ytd[key] = latest_ytd(facts, TAGS[key], after=fy_end, period_end=quarter_end)
+    ytd["eps"] = latest_ytd(facts, TAGS["eps"], unit="USD/shares", after=fy_end, period_end=quarter_end)
+
+    def roll(key: str, fy_value: float | None, scale: float) -> float | None:
+        current = ytd[key]
+        if current is None or current["prior_value"] is None or fy_value is None:
+            return None
+        return fy_value + (current["value"] - current["prior_value"]) / scale
+
+    ltm_revenue = roll("revenue", fy_row["revenue"], 1e6)
+    ebit = roll("operating_income", fy_row["ebit"], 1e6)
+    dep_amort = roll("dep_amort", fy_row["dep_amort"], 1e6)
+    if dep_amort is None:
+        dep_amort = fy_row["dep_amort"]
+    net_income = roll("net_income", fy_row["net_income"], 1e6)
+    eps = roll("eps", fy_row["eps"], 1.0)
+    capex = roll("capex", fy_row["capex"], 1e6)
+    return {
+        "fiscal_year": fy_row["fiscal_year"],
+        "period_type": "LTM",
+        "period_end": quarter_end.isoformat(),
+        "is_estimate": 0,
+        "revenue": round(ltm_revenue, 1) if ltm_revenue is not None else None,
+        "ebitda": round(ebit + dep_amort, 1) if ebit is not None and dep_amort is not None else None,
+        "ebit": round(ebit, 1) if ebit is not None else None,
+        "net_income": round(net_income, 1) if net_income is not None else None,
+        "eps": round(eps, 2) if eps is not None else None,
+        "dep_amort": round(dep_amort, 1) if dep_amort is not None else None,
+        "capex": round(capex, 1) if capex is not None else None,
+        "nwc_change": None,
+        "tax_rate": fy_row["tax_rate"],
+    }
+
+
+def _year_earlier(when: date) -> date:
+    """The same day a year before; 29 February maps to the 28th (Ruby's ``<< 12``)."""
+    try:
+        return when.replace(year=when.year - 1)
+    except ValueError:
+        return when.replace(year=when.year - 1, day=28)
+
+
+def _near(when: date, target: date, *, days: int = 10) -> bool:
+    return abs((when - target).days) <= days
+
+
+def latest_ytd(
+    facts: dict[str, Any], names: Sequence[str], *, unit: str = "USD",
+    after: date, period_end: date | None = None,
+) -> dict[str, Any] | None:
+    """The latest year-to-date 10-Q observation of a duration concept.
+
+    Only periods ending after ``after`` (and exactly on ``period_end`` when
+    given) qualify; the span must be a Q1, Q2 or Q3 year-to-date span. Returns
+    ``{"quarter", "period_start", "period_end", "value", "prior_value", "tag"}``
+    — ``prior_value`` being the prior-year comparable of the same span, None
+    when not filed — or None. The first tag with a qualifying period wins.
+    """
+    us_gaap = _us_gaap(facts)
+    for name in names:
+        durations = [
+            entry for entry in (us_gaap.get(name) or {}).get("units", {}).get(unit, []) or []
+            if entry.get("start") and entry.get("end")
+        ]
+        current = []
+        for entry in durations:
+            if entry.get("form") not in QUARTERLY_FORMS:
+                continue
+            start = date.fromisoformat(entry["start"])
+            finish = date.fromisoformat(entry["end"])
+            span = (finish - start).days
+            quarter = next((q for q, (low, high) in YTD_SPANS.items() if low <= span <= high), None)
+            if quarter is None or finish <= after:
+                continue
+            if period_end is not None and finish != period_end:
+                continue
+            current.append((entry, start, finish, quarter))
+        if not current:
+            continue
+        # Latest end, then latest filed; at a full tie the longer span wins. A
+        # Q2 10-Q tags the three months (~91 days, inside the Q1 window) and
+        # the six months to the same date; rolling the three months would drop
+        # Q1's change. Filers list the longer span first, which the Ruby port
+        # relies on by order; the explicit key does not depend on it.
+        entry, start, finish, quarter = max(
+            current, key=lambda item: (item[2], str(item[0].get("filed") or ""), (item[2] - item[1]).days))
+        prior_start, prior_end = _year_earlier(start), _year_earlier(finish)
+        priors = [
+            e for e in durations
+            if _near(date.fromisoformat(e["end"]), prior_end) and _near(date.fromisoformat(e["start"]), prior_start)
+        ]
+        prior = max(priors, key=lambda e: str(e.get("filed") or "")) if priors else None
+        return {
+            "quarter": quarter,
+            "period_start": start,
+            "period_end": finish,
+            "value": float(entry["val"]),
+            "prior_value": float(prior["val"]) if prior else None,
+            "tag": name,
+        }
+    return None
 
 
 def _operating_working_capital(balance: dict[str, dict[int, float]], year: int) -> float | None:
@@ -269,8 +571,11 @@ def _operating_working_capital(balance: dict[str, dict[int, float]], year: int) 
 
 
 def net_debt(facts: dict[str, Any], fiscal_year: int) -> float | None:
-    """Gross debt less cash and short-term investments, in millions."""
-    balance = {key: _instant_values(facts, names) for key, names in INSTANT_TAGS.items()}
+    """Gross debt less cash and short-term investments at a fiscal year end, in millions.
+
+    This is the year-end view; the loader stores :func:`latest_balance_sheet`.
+    """
+    balance = {key: instant_values(facts, names) for key, names in INSTANT_TAGS.items()}
     debt = balance["debt_current"].get(fiscal_year, 0.0) + balance["debt_noncurrent"].get(fiscal_year, 0.0)
     cash = balance["cash"].get(fiscal_year)
     if cash is None and not debt:
@@ -387,8 +692,16 @@ def load_company(
     press_releases: int = 4,
     with_documents: bool = True,
     with_quote: bool = True,
+    with_estimates: bool = True,
 ) -> dict[str, Any]:
-    """Load one real company: profile, financials, market data and filings."""
+    """Load one real company: profile, financials, market data and filings.
+
+    Financials are the fiscal-year rows, the LTM row when a 10-Q extends the
+    last year, and — with ``with_estimates`` — up to two consensus rows
+    (``is_estimate`` = 1) so forward (NTM) multiples rest on published
+    estimates rather than nothing. Market data bridges through the latest
+    balance sheet, dated, not the last fiscal year end.
+    """
     cik = resolve_cik(ticker)
     if not cik:
         raise ValueError(f"no SEC filer found for ticker {ticker.upper()}")
@@ -413,24 +726,38 @@ def load_company(
     })
 
     financial_rows = build_financials(facts, years=years)
+    fiscal_rows = [row for row in financial_rows if row["period_type"] == "FY"]
+    ltm = next((row for row in financial_rows if row["period_type"] == "LTM"), None)
+    estimates = fetch_estimates(ticker) if with_estimates else None
+    estimate_rows = _estimate_rows(estimates, {row["fiscal_year"] for row in fiscal_rows})
+
+    # Replace rather than merge: a restated year must not leave stale rows.
     conn.execute("DELETE FROM financials WHERE company_id = ?", (company_id,))
-    for row in financial_rows:
+    for row in financial_rows + estimate_rows:
         insert(conn, "financials", {"company_id": company_id, **row})
 
-    latest_year = financial_rows[-1]["fiscal_year"] if financial_rows else None
     quote = fetch_quote(ticker) if with_quote else None
-    shares = shares_outstanding(facts)
-    if quote and shares:
+    share_counts = shares(facts)
+    balance = latest_balance_sheet(facts)
+    if quote and share_counts["diluted"]:
         conn.execute("DELETE FROM market_data WHERE company_id = ?", (company_id,))
         insert(conn, "market_data", {
             "company_id": company_id,
             "as_of": quote.get("as_of") or date.today().isoformat(),
             "share_price": quote["share_price"],
-            "shares_diluted": round(shares / 1e6, 2),       # millions, as elsewhere
-            "net_debt": net_debt(facts, latest_year) if latest_year else None,
+            "shares_diluted": round(share_counts["diluted"] / 1e6, 2),   # millions, as elsewhere
+            "shares_basic": round(share_counts["basic"] / 1e6, 2) if share_counts["basic"] else None,
+            # The latest balance sheet (10-K or 10-Q), dated, with the other
+            # claims the EV bridge deducts — not the last fiscal year end.
+            "net_debt": balance["net_debt"] if balance else None,
+            "net_debt_as_of": balance["as_of"] if balance else None,
+            "balance_sheet_form": balance["form"] if balance else None,
+            "minority_interest": balance["minority_interest"] if balance else None,
+            "preferred_equity": balance["preferred_equity"] if balance else None,
+            "debt_note": balance["debt_note"] if balance else None,
             "week52_low": quote.get("week52_low"),
             "week52_high": quote.get("week52_high"),
-            "beta": None,
+            "beta": estimates.get("beta") if estimates else None,
         })
     conn.commit()
 
@@ -443,12 +770,47 @@ def load_company(
         "ticker": ticker.upper(),
         "name": name,
         "cik": cik,
-        "fiscal_years": [row["fiscal_year"] for row in financial_rows],
-        "latest_revenue": financial_rows[-1]["revenue"] if financial_rows else None,
+        "fiscal_years": [row["fiscal_year"] for row in fiscal_rows],
+        "latest_revenue": fiscal_rows[-1]["revenue"] if fiscal_rows else None,
+        "ltm_period_end": ltm["period_end"] if ltm else None,
+        "shares_basis": share_counts["basis"],
+        "net_debt_as_of": balance["as_of"] if balance else None,
+        "estimate_years": [row["fiscal_year"] for row in estimate_rows],
         "share_price": quote["share_price"] if quote else None,
+        # The quote cache refreshes daily; saying which day the price is from
+        # lets a reader tell a fresh load from one served out of the cache.
+        "quote_as_of": quote.get("as_of") if quote else None,
         "documents_added": ingested["added"],
         "documents_skipped": ingested["skipped"],
     }
+
+
+def _estimate_rows(estimates: dict[str, Any] | None, actual_years: set[int]) -> list[dict[str, Any]]:
+    """Consensus estimates as financials rows (``is_estimate`` = 1, FY).
+
+    A year that already has a reported FY row is skipped: the actual wins, and
+    the (company, year, period_type) key would refuse the duplicate anyway —
+    which happens for a few days after a 10-K while Yahoo's "0y" still points
+    at the year just reported. EBITDA stays None: there is no consensus EBITDA
+    in the feed, and operating income plus D&A cannot be built from it.
+    """
+    if not estimates:
+        return []
+    rows = []
+    for estimate in estimates.get("estimates") or []:
+        if estimate["fiscal_year"] in actual_years:
+            continue
+        rows.append({
+            "fiscal_year": estimate["fiscal_year"],
+            "period_type": "FY",
+            "period_end": estimate["period_end"],
+            "is_estimate": 1,
+            "estimate_source": estimate["source"],
+            "revenue": estimate["revenue"],
+            "eps": estimate["eps"],
+            "ebitda": None,
+        })
+    return rows
 
 
 def load_companies(
@@ -481,7 +843,10 @@ def load_transactions_csv(conn: sqlite3.Connection, path) -> dict[str, int]:
     import csv
     from pathlib import Path
 
-    rows = list(csv.DictReader(Path(path).open(encoding="utf-8")))
+    # utf-8-sig: a spreadsheet's byte-order mark must not become part of the
+    # first header ("\ufeffannounced_on"), which would silently skip every row.
+    with Path(path).open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
     added = 0
     for row in rows:
         if not row.get("announced_on") or not row.get("target"):
