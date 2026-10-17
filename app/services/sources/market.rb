@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "cgi"
+
 module Sources
   # Public market quotes.
   #
@@ -10,6 +12,14 @@ module Sources
     QUOTE_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%<ticker>s?range=1y&interval=1d"
     # A browser-ish agent: the quote endpoint rejects the SEC-style identifier.
     QUOTE_USER_AGENT = "Mozilla/5.0 (compatible; Argos-Research-Tool/1.0)"
+    # Consensus estimates and beta live behind the quote-summary endpoint, which
+    # wants a session cookie and a matching "crumb" (an anti-forgery token the
+    # site hands out once the cookie is set). The three-step dance below is the
+    # public one every browser does; neither the cookie nor the crumb is cached.
+    COOKIE_URL = "https://fc.yahoo.com"
+    CRUMB_URL = "https://query2.finance.yahoo.com/v1/test/getcrumb"
+    ESTIMATES_URL = "https://query2.finance.yahoo.com/v10/finance/quoteSummary/%<ticker>s?modules=earningsTrend,defaultKeyStatistics"
+    ESTIMATE_PERIODS = %w[0y +1y].freeze
 
     module_function
 
@@ -51,6 +61,75 @@ module Sources
     # forever and "re-run the loader to refresh" was false.
     def quote_url(ticker, on: Date.today)
       "#{format(QUOTE_URL, ticker: ticker.upcase)}&asof=#{on.iso8601}"
+    end
+
+    # Consensus revenue and EPS for the fiscal year in progress and the next,
+    # plus beta: {ticker:, estimates: [{fiscal_year:, period_end:, revenue:,
+    # eps:, analysts:, source:}], beta:, as_of:} or nil. Revenue in millions,
+    # like the rest of the application. Cached per (ticker, calendar day) as
+    # the parsed payload, never the session cookie or crumb.
+    def fetch_estimates(ticker, cache: true, on: Date.today)
+      path = Http.cache_path("estimates://#{ticker.upcase}?asof=#{on.iso8601}")
+      payload =
+        if cache && path.exist?
+          JSON.parse(File.read(path), symbolize_names: true)
+        else
+          fetched = estimates_payload(ticker)
+          if fetched && cache
+            Http.cache_dir.mkpath
+            File.binwrite(path, JSON.generate(fetched))
+          end
+          fetched
+        end
+      payload && parse_estimates(payload, ticker: ticker, on: on)
+    rescue StandardError
+      nil
+    end
+
+    # The network seam (tests replace it): cookie, crumb, then the summary.
+    def estimates_payload(ticker)
+      headers = { "User-Agent" => QUOTE_USER_AGENT, "Accept" => "*/*" }
+      cookie = Http.perform_request(URI.parse(COOKIE_URL), headers, 20).get_fields("set-cookie").to_a
+                   .map { |line| line.split(";", 2).first }.join("; ")
+      return nil if cookie.empty?
+
+      headers["Cookie"] = cookie
+      crumb = Http.perform_request(URI.parse(CRUMB_URL), headers, 20).body.to_s.strip
+      return nil if crumb.empty? || crumb.include?("<")
+
+      url = "#{format(ESTIMATES_URL, ticker: ticker.upcase)}&crumb=#{CGI.escape(crumb)}"
+      response = Http.perform_request(URI.parse(url), headers, 20)
+      return nil unless response.code.to_i == 200
+
+      JSON.parse(response.body.to_s, symbolize_names: true)
+    end
+
+    def parse_estimates(payload, ticker:, on: Date.today)
+      result = (payload.dig(:quoteSummary, :result) || []).first
+      return nil if result.nil?
+
+      rows = (result.dig(:earningsTrend, :trend) || []).filter_map do |trend|
+        next unless ESTIMATE_PERIODS.include?(trend[:period].to_s)
+
+        end_date = trend[:endDate].to_s
+        next if end_date.empty?
+
+        revenue = trend.dig(:revenueEstimate, :avg, :raw)
+        eps = trend.dig(:earningsEstimate, :avg, :raw)
+        next if revenue.nil? && eps.nil?
+
+        analysts = trend.dig(:revenueEstimate, :numberOfAnalysts, :raw) || trend.dig(:earningsEstimate, :numberOfAnalysts, :raw)
+        {
+          fiscal_year: Sec.fiscal_year(end_date),
+          period_end: Date.iso8601(end_date),
+          revenue: revenue.nil? ? nil : py_round(revenue.to_f / 1e6, 1),
+          eps: eps.nil? ? nil : py_round(eps.to_f, 2),
+          analysts: analysts&.to_i,
+          source: "consensus (Yahoo Finance, #{analysts.to_i} analysts)"
+        }
+      end
+      beta = result.dig(:defaultKeyStatistics, :beta, :raw)
+      { ticker: ticker.upcase, estimates: rows.sort_by { |row| row[:period_end] }, beta: beta&.to_f, as_of: on }
     end
 
     # Python's `or` on a number: nil and zero both fall through to the fallback.

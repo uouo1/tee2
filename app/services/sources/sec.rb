@@ -590,7 +590,7 @@ module Sources
     # Load one real company: profile, financials, market data and filings.
     def load_company(
       ticker, sector: nil, years: 6, annual: 1, quarterly: 2, press_releases: 4,
-      with_documents: true, with_quote: true
+      with_documents: true, with_quote: true, with_estimates: true
     )
       cik = resolve_cik(ticker)
       raise ArgumentError, "no SEC filer found for ticker #{ticker.upcase}" unless cik
@@ -604,8 +604,20 @@ module Sources
       fiscal_rows = financial_rows.select { |row| row[:period_type] == "FY" }
       ltm = financial_rows.find { |row| row[:period_type] == "LTM" }
       quote = with_quote ? Market.fetch_quote(ticker) : nil
+      estimates = with_estimates ? Market.fetch_estimates(ticker) : nil
       share_counts = shares(facts)
       balance = latest_balance_sheet(facts)
+      latest_fiscal_year = fiscal_rows.last&.fetch(:fiscal_year)
+      # Consensus rows for the fiscal years not yet reported, so the valuation
+      # can quote NTM multiples beside LTM. No consensus EBITDA is published
+      # here; Valuation derives it from consensus revenue at the LTM margin and
+      # says so.
+      estimate_rows = (estimates ? estimates[:estimates] : []).select do |row|
+        latest_fiscal_year.nil? || row[:fiscal_year] > latest_fiscal_year
+      end.map do |row|
+        { fiscal_year: row[:fiscal_year], period_type: "FY", period_end: row[:period_end], is_estimate: true,
+          revenue: row[:revenue], eps: row[:eps], estimate_source: row[:source] }
+      end
 
       company = nil
       ActiveRecord::Base.transaction do
@@ -624,6 +636,7 @@ module Sources
         # Replace rather than merge: a restated year must not leave stale rows.
         company.financials.delete_all
         financial_rows.each { |row| company.financials.create!(row) }
+        estimate_rows.each { |row| company.financials.create!(row) }
 
         if quote && share_counts[:diluted]
           MarketDatum.where(company_id: company.id).delete_all
@@ -643,7 +656,7 @@ module Sources
             debt_note: balance && balance[:debt_note],
             week52_low: quote[:week52_low],
             week52_high: quote[:week52_high],
-            beta: nil
+            beta: estimates && estimates[:beta]
           )
         end
       end
@@ -665,6 +678,8 @@ module Sources
         ltm_period_end: ltm && ltm[:period_end],
         shares_basis: share_counts[:basis],
         net_debt_as_of: balance && balance[:as_of],
+        estimate_years: estimate_rows.map { |row| row[:fiscal_year] },
+        beta: estimates && estimates[:beta],
         share_price: quote ? quote[:share_price] : nil,
         # The quote cache refreshes daily; saying which day the price is from
         # lets a reader tell a fresh load from one served out of the cache.

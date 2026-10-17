@@ -149,8 +149,11 @@ Valuation::MULTIPLES, Valuation::MULTIPLE_LABELS
 Valuation.percentile(values, pct) -> Float | nil   # linear interpolation
 Valuation.describe(values) -> {count:, min:, p25:, median:, p75:, max:, mean:}
 Valuation.company_metrics(ticker, forward_years: 2) -> Hash | nil   # latest_actual (last FY), ltm (or nil), valuation_basis (LTM when present, else FY),
-                                                                     # basis_label ("LTM Jun-26" / "FY2025"), ev_bridge, net_debt_as_of, other_claims, forward, financials
-Valuation.comps_table(tickers, exclude: nil) -> {rows:, stats:, labels:, bases:}   # rows carry basis, price_date, net_debt_as_of, other_claims
+                                                                     # basis_label ("LTM Jun-26" / "FY2025"), ntm (or nil), ev_bridge, net_debt_as_of, other_claims, forward, financials
+Valuation.ntm_metrics(fiscal_rows, basis, as_of:, enterprise_value:, price:) -> Hash | nil   # calendarised next twelve months: weight_current_year, revenue, eps,
+                                                                     # ebitda (consensus when a row has it, else derived at the basis margin and flagged ebitda_derived), ev_revenue, ev_ebitda, pe, fiscal_years, source
+Valuation.comps_table(tickers, exclude: nil) -> {rows:, stats:, labels:, bases:}   # rows carry basis, price_date, net_debt_as_of, other_claims, ev_revenue_ntm, ev_ebitda_ntm, pe_ntm;
+                                                                                    # stats cover MULTIPLES and NTM_MULTIPLES
 Valuation.precedent_transactions(sector: nil) -> {rows:, stats:}
 Valuation.implied_from_multiple(low, high, metric_value:, kind:, net_debt:, shares:, other_claims: 0.0) -> Hash | nil
 Valuation.wacc_build(metrics, risk_free_rate:, equity_risk_premium:, debt_spread:, beta:, tax_rate:) -> Hash   # CAPM build with inputs, weights, notes
@@ -182,8 +185,15 @@ when the target's EBITDA margin lies outside the peers' interquartile range.
 EV = market cap + net debt + minority interest + preferred equity, with the
 balance-sheet date and form reported beside it. Multiples are quoted on the
 LTM row when the loader built one, else the last fiscal year, and every page
-must print `basis_label` next to them. Omit the precedent bar when no
-transactions exist (never fabricate).
+must print `basis_label` next to them. NTM: the loader stores consensus
+revenue and EPS for the fiscal year in progress and the next as estimate rows
+(`estimate_source` names the source and analyst count); `ntm_metrics` blends
+them by the share of the current year still ahead at the price date; a
+"Trading comps — NTM EV/EBITDA" bar leads the football field when the target
+has an NTM EBITDA and at least `MIN_NTM_PEERS` (3) peers carry one, and its
+basis says whether the EBITDA was derived from consensus revenue at the
+current margin (no public source publishes consensus EBITDA). Omit the
+precedent bar when no transactions exist (never fabricate).
 
 ### `Charts` (`app/services/charts.rb`) — port of `argos/charts.py`
 
@@ -260,6 +270,8 @@ Sources::Sec.instant_entries(facts, names, forms:, fiscal_year_only:) -> {Date =
 Sources::Sec.latest_balance_sheet(facts) -> Hash | nil             # newest 10-K/10-Q balance sheet at one date: cash, debt lines, gross_debt, net_debt, minority_interest, preferred_equity, debt_note
 Sources::Sec.ltm_row(facts, fy_row) -> Hash | nil                   # FY + YTD − prior YTD per flow; D&A falls back to the FY figure
 Sources::Sec.net_debt(facts, fiscal_year) -> Float | nil            # the fiscal-year-end view
+Sources::Market.fetch_estimates(ticker, cache: true, on: Date.today) -> Hash | nil   # consensus revenue/EPS for the current and next fiscal year plus beta,
+                                                                     # via the quote summary (cookie + crumb; neither cached); parsed payload cached per (ticker, day)
 Sources::Sec.shares(facts) -> {diluted:, basic:, basis:, fallback_reason:}   # weighted diluted only if from the latest FY and within 0.5–2x of the cover count
 Sources::Sec.collect_documents(cik, submissions, annual: 1, quarterly: 2, press_releases: 4) -> [Hash]   # EX-99.1 by normalised name
 Sources::Sec.load_company(ticker, sector: nil, years: 6, annual: 1, quarterly: 2, press_releases: 4, with_documents: true, with_quote: true) -> Hash
@@ -377,8 +389,11 @@ the API and the web UI.
     with its date and form stored; non-controlling interest and preferred
     equity are deducted; a filer with no debt line is bridged at zero debt with
     `debt_note` set. Tags resolve per year/date, never once per company.
-12. **LTM.** `build_financials` adds a trailing-twelve-month row from the latest
-    10-Q; `Valuation` quotes multiples on it when present and labels the basis.
+12. **LTM and NTM.** `build_financials` adds a trailing-twelve-month row from
+    the latest 10-Q; `Valuation` quotes multiples on it when present and labels
+    the basis. `load_company` stores consensus revenue and EPS estimate rows and
+    beta; `Valuation` calendarises them to NTM and leads the comps with an NTM
+    EV/EBITDA bar, flagging a derived EBITDA.
 13. **DCF mechanics** as listed under `Valuation` above: ΔNWC on revenue
     change, linear growth path, stub period, terminal year with a capex floor,
     exit multiple at N, built-up WACC, no bridge through unknown net debt.

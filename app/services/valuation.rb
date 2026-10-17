@@ -22,7 +22,13 @@
 # `Valuation::DcfAssumptions` lives in valuation/dcf_assumptions.rb.
 module Valuation
   MULTIPLES = %i[ev_revenue ev_ebitda pe].freeze
-  MULTIPLE_LABELS = { ev_revenue: "EV / Revenue", ev_ebitda: "EV / EBITDA", pe: "P / E" }.freeze
+  NTM_MULTIPLES = %i[ev_revenue_ntm ev_ebitda_ntm pe_ntm].freeze
+  MULTIPLE_LABELS = {
+    ev_revenue: "EV / Revenue", ev_ebitda: "EV / EBITDA", pe: "P / E",
+    ev_revenue_ntm: "EV / NTM Revenue", ev_ebitda_ntm: "EV / NTM EBITDA", pe_ntm: "NTM P / E"
+  }.freeze
+  # A next-twelve-months comps bar needs this many peers with an NTM multiple.
+  MIN_NTM_PEERS = 3
 
   # Valuation defaults (argos/config.py `Config`), overridable per pitch book.
   DEFAULT_WACC = 0.095 # only when no WACC build is possible (no market cap at all)
@@ -109,6 +115,8 @@ module Valuation
     basis_row = ltm || latest
     forwards = fiscal.select { |f| f[:is_estimate] }.first(forward_years)
                      .map { |f| multiples_for(f, enterprise_value: enterprise_value, price: price) }
+    basis_multiples = multiples_for(basis_row, enterprise_value: enterprise_value, price: price)
+    ntm = ntm_metrics(fiscal, basis_multiples, as_of: market&.as_of, enterprise_value: enterprise_value, price: price)
     {
       company_id: company.id,
       ticker: company.ticker,
@@ -154,11 +162,73 @@ module Valuation
       beta: market&.beta,
       latest_actual: multiples_for(latest, enterprise_value: enterprise_value, price: price),
       ltm: ltm && multiples_for(ltm, enterprise_value: enterprise_value, price: price),
-      valuation_basis: multiples_for(basis_row, enterprise_value: enterprise_value, price: price),
+      valuation_basis: basis_multiples,
       basis_label: basis_label(basis_row),
+      ntm: ntm,
       forward: forwards,
       financials: financials
     }
+  end
+
+  # Next-twelve-months figures, calendarised the way a comps page does it: the
+  # fiscal year in progress at `as_of` and the one after, weighted by the share
+  # of the current year still ahead. Revenue and EPS come from the rows
+  # (consensus estimates carry `estimate_source`); EBITDA too when a row has
+  # it, otherwise it is derived from NTM revenue at the basis row's EBITDA
+  # margin and flagged, because no public source publishes consensus EBITDA.
+  # Nil when no fiscal year ends after `as_of` or when nothing beyond the
+  # current year is estimated.
+  def ntm_metrics(fiscal_rows, basis, as_of:, enterprise_value:, price:)
+    return nil if fiscal_rows.empty?
+
+    as_of = as_of.nil? ? Date.today : (as_of.is_a?(Date) ? as_of : Date.iso8601(as_of.to_s))
+    rows = fiscal_rows.sort_by { |row| row[:fiscal_year].to_i }
+    current = rows.find { |row| fiscal_period_end(row) > as_of }
+    return nil if current.nil?
+
+    following = rows.find { |row| row[:fiscal_year].to_i == current[:fiscal_year].to_i + 1 }
+    return nil if following.nil? && !current[:is_estimate]
+
+    weight = ((fiscal_period_end(current) - as_of).to_f / 365.25).clamp(0.0, 1.0)
+    blend = lambda do |key|
+      first = current[key]
+      second = following && following[key]
+      next nil if first.nil?
+      next first.to_f if second.nil?
+
+      weight * first.to_f + (1 - weight) * second.to_f
+    end
+    revenue = blend.call(:revenue)
+    eps = blend.call(:eps)
+    ebitda = blend.call(:ebitda)
+    derived = false
+    if ebitda.nil? && revenue && basis && basis[:ebitda_margin]
+      ebitda = revenue * basis[:ebitda_margin].to_f
+      derived = true
+    end
+    {
+      revenue: revenue && rnd(revenue, 1),
+      ebitda: ebitda && rnd(ebitda, 1),
+      ebitda_derived: derived,
+      eps: eps && rnd(eps, 2),
+      ev_revenue: number?(revenue) && !enterprise_value.nil? ? rnd(enterprise_value / revenue, 2) : nil,
+      ev_ebitda: number?(ebitda) && !enterprise_value.nil? ? rnd(enterprise_value / ebitda, 2) : nil,
+      pe: number?(eps) && number?(price) ? rnd(price / eps, 2) : nil,
+      weight_current_year: rnd(weight, 4),
+      fiscal_years: [current[:fiscal_year], following && following[:fiscal_year]].compact,
+      period_end: fiscal_period_end(current) >> 12 > as_of ? (as_of >> 12) : fiscal_period_end(current),
+      source: (following && following[:estimate_source]) || current[:estimate_source] || "estimate rows",
+      label: "NTM"
+    }
+  end
+
+  # A fiscal year ends on its period_end, or on 31 December of its year when the
+  # row carries no date (seeded data).
+  def fiscal_period_end(row)
+    period_end = row[:period_end]
+    return Date.new(row[:fiscal_year].to_i, 12, 31) if period_end.nil?
+
+    period_end.is_a?(Date) ? period_end : Date.iso8601(period_end.to_s)
   end
 
   # "LTM Jun-26" or "FY2025": the vintage every multiple is quoted on.
@@ -206,13 +276,17 @@ module Valuation
         pe: basis[:pe],
         fiscal_year: basis[:fiscal_year],
         basis: metrics[:basis_label],
-        period_type: basis[:period_type]
+        period_type: basis[:period_type],
+        ev_revenue_ntm: metrics.dig(:ntm, :ev_revenue),
+        ev_ebitda_ntm: metrics.dig(:ntm, :ev_ebitda),
+        pe_ntm: metrics.dig(:ntm, :pe),
+        ntm_ebitda_derived: metrics.dig(:ntm, :ebitda_derived)
       }
     end
     # Largest first. Python's sort is stable; Ruby's sort_by is not, so the
     # original index breaks ties the same way.
     rows = rows.each_with_index.sort_by { |row, index| [-(row[:enterprise_value] || 0), index] }.map(&:first)
-    stats = MULTIPLES.to_h { |m| [m, round_stats(describe(rows.map { |r| r[m] }))] }
+    stats = (MULTIPLES + NTM_MULTIPLES).to_h { |m| [m, round_stats(describe(rows.map { |r| r[m] }))] }
     { rows: rows, stats: stats, labels: MULTIPLE_LABELS, bases: rows.map { |r| r[:basis] }.tally }
   end
 
@@ -518,6 +592,23 @@ module Valuation
     precedents = precedent_transactions(sector: target[:sector])
     ranges = []
 
+    # Bankers lead with the forward multiple when the set supports one.
+    ntm = target[:ntm]
+    ntm_ebitda = comps[:stats][:ev_ebitda_ntm]
+    if ntm && number?(ntm[:ebitda]) && ntm_ebitda[:count].to_i >= MIN_NTM_PEERS
+      implied = implied_from_multiple(
+        ntm_ebitda[:p25], ntm_ebitda[:p75],
+        metric_value: ntm[:ebitda], kind: "ev", net_debt: net_debt, shares: shares, other_claims: other_claims
+      )
+      if implied
+        ranges << valuation_range(
+          "Trading comps — NTM EV/EBITDA", implied[:low], implied[:high],
+          basis: "#{implied[:multiple_low]}x–#{implied[:multiple_high]}x on NTM EBITDA of #{format('%.0f', implied[:metric_value])} "                  "(#{ntm[:ebitda_derived] ? 'consensus revenue at the current margin' : 'estimate rows'}; #{ntm_ebitda[:count]} peers)",
+          detail: implied.merge(ebitda_derived: ntm[:ebitda_derived], source: ntm[:source])
+        )
+      end
+    end
+
     comp_ebitda = comps[:stats][:ev_ebitda]
     implied = implied_from_multiple(
       comp_ebitda[:p25], comp_ebitda[:p75],
@@ -799,5 +890,5 @@ module Valuation
   end
 
   private_class_method :rnd, :round_stats, :fsum, :number?, :num_or, :to_assumptions, :multiples_for,
-                       :valuation_range, :margin_outlier
+                       :valuation_range, :margin_outlier, :fiscal_period_end
 end

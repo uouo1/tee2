@@ -288,7 +288,8 @@ class ValuationCompsTest < ActiveSupport::TestCase
   test "rows carry the inputs behind each multiple" do
     row = Valuation.comps_table(%w[HLDX])[:rows].first
     assert_equal %i[ticker name country share_price price_date market_cap enterprise_value net_debt net_debt_as_of other_claims
-                    shares_diluted shares_basic revenue ebitda ebitda_margin ev_revenue ev_ebitda pe fiscal_year basis period_type],
+                    shares_diluted shares_basic revenue ebitda ebitda_margin ev_revenue ev_ebitda pe fiscal_year basis period_type
+                    ev_revenue_ntm ev_ebitda_ntm pe_ntm ntm_ebitda_derived],
                  row.keys
     assert_equal 141.0, row[:shares_diluted]
     assert_equal 1320.0, row[:revenue]
@@ -718,8 +719,35 @@ class ValuationFootballFieldTest < ActiveSupport::TestCase
     %w[DCF 52-week\ trading\ range].each { |expected| assert_includes methods, expected }
     assert methods.any? { |method| method.include?("Trading comps") }
     assert methods.any? { |method| method.include?("Precedent") }
-    assert_equal ["Trading comps — EV/EBITDA", "Trading comps — EV/Revenue", "Precedent transactions — EV/EBITDA",
-                  "DCF", "52-week trading range"], methods
+    assert_equal ["Trading comps — NTM EV/EBITDA", "Trading comps — EV/EBITDA", "Trading comps — EV/Revenue",
+                  "Precedent transactions — EV/EBITDA", "DCF", "52-week trading range"], methods
+  end
+
+  test "the NTM comps bar leads, calendarised from the demo's estimate years, and names its derivation" do
+    ntm = @field[:ranges].first
+    assert_equal "Trading comps — NTM EV/EBITDA", ntm[:method]
+    assert ntm[:in_conclusion]
+    assert_match(/on NTM EBITDA of \d+ \(estimate rows; 6 peers\)/, ntm[:basis])
+    metrics = Valuation.company_metrics("NVG")
+    # Price date 9 October 2026: 83 days of FY2026 remain, so NTM is 22.7% FY2026 and 77.3% FY2027.
+    assert_in_delta 83 / 365.25, metrics[:ntm][:weight_current_year], 1e-3
+    assert_equal [2026, 2027], metrics[:ntm][:fiscal_years]
+    assert_equal false, metrics[:ntm][:ebitda_derived], "the seeded estimate rows carry EBITDA"
+    rows = metrics[:financials].select { |f| f[:period_type] == "FY" }
+    fy26 = rows.find { |f| f[:fiscal_year] == 2026 }
+    fy27 = rows.find { |f| f[:fiscal_year] == 2027 }
+    w = metrics[:ntm][:weight_current_year]
+    assert_in_delta w * fy26[:ebitda] + (1 - w) * fy27[:ebitda], metrics[:ntm][:ebitda], 0.06
+    assert_in_delta metrics[:enterprise_value] / metrics[:ntm][:ebitda], metrics[:ntm][:ev_ebitda], 0.006
+    stats = @field[:comps][:stats][:ev_ebitda_ntm]
+    assert_equal 6, stats[:count]
+    assert_operator stats[:median], :<, @field[:comps][:stats][:ev_ebitda][:median], "growing peers trade cheaper on forward EBITDA"
+  end
+
+  test "no NTM bar without three peers carrying an NTM multiple" do
+    field = Valuation.football_field("NVG", %w[HLDX VLTR])
+    refute_includes field[:ranges].map { |r| r[:method] }, "Trading comps — NTM EV/EBITDA"
+    assert_equal 2, field[:comps][:stats][:ev_ebitda_ntm][:count]
   end
 
   test "ranges are ordered and documented" do
@@ -763,7 +791,8 @@ class ValuationFootballFieldTest < ActiveSupport::TestCase
     assert_equal false, revenue[:in_conclusion]
     assert_match(/outside the peer interquartile range/, revenue[:note])
     assert @field[:ranges].reject { |r| r == week || r == revenue }.all? { |r| r[:in_conclusion] }
-    assert_equal ["Trading comps — EV/EBITDA", "Precedent transactions — EV/EBITDA", "DCF"], @field[:concluded_range][:methods]
+    assert_equal ["Trading comps — NTM EV/EBITDA", "Trading comps — EV/EBITDA", "Precedent transactions — EV/EBITDA", "DCF"],
+                 @field[:concluded_range][:methods]
   end
 
   test "the WACC is built from its parts and shown with the field" do
@@ -810,7 +839,7 @@ class ValuationFootballFieldTest < ActiveSupport::TestCase
     counted = @field[:ranges].select { |r| r[:in_conclusion] }
     assert_in_delta Valuation.percentile(counted.map { |r| r[:low] }, 0.5), @field[:concluded_range][:low], 0.006
     assert_in_delta Valuation.percentile(counted.map { |r| r[:high] }, 0.5), @field[:concluded_range][:high], 0.006
-    assert_equal({ low: 30.2, high: 45.11, methods: counted.map { |r| r[:method] } }, @field[:concluded_range])
+    assert_equal({ low: 31.03, high: 44.8, methods: counted.map { |r| r[:method] } }, @field[:concluded_range])
   end
 
   test "dcf bar uses the narrow band while the sensitivity shows the wide grid" do
@@ -873,8 +902,8 @@ class ValuationFootballFieldWithoutPrecedentsTest < ActiveSupport::TestCase
 
   test "the precedent bar is omitted rather than fabricated" do
     methods = @field[:ranges].map { |row| row[:method] }
-    assert_equal ["Trading comps — EV/EBITDA", "Trading comps — EV/Revenue", "DCF", "52-week trading range"],
-                 methods
+    assert_equal ["Trading comps — NTM EV/EBITDA", "Trading comps — EV/EBITDA", "Trading comps — EV/Revenue", "DCF",
+                  "52-week trading range"], methods
     assert_empty @field[:precedents][:rows]
     assert_equal 0, @field[:precedents][:stats][:ev_ebitda][:count]
   end
@@ -1001,6 +1030,50 @@ class ValuationDefaultAssumptionsTest < ActiveSupport::TestCase
   end
 end
 
+
+class ValuationNtmTest < ActiveSupport::TestCase
+  setup do
+    @company = Company.create!(ticker: "NTMX", name: "Forward Co", sector: "Test")
+    Financial.create!(company: @company, fiscal_year: 2025, period_end: Date.new(2025, 12, 31), revenue: 2400.0, ebitda: 360.0, ebit: 300.0, eps: 5.0)
+    Financial.create!(company: @company, fiscal_year: 2026, period_end: Date.new(2026, 12, 31), is_estimate: true, revenue: 2388.1, eps: 6.42,
+                      estimate_source: "consensus (Yahoo Finance, 9 analysts)")
+    Financial.create!(company: @company, fiscal_year: 2027, period_end: Date.new(2027, 12, 31), is_estimate: true, revenue: 2553.2, eps: 7.0,
+                      estimate_source: "consensus (Yahoo Finance, 9 analysts)")
+    MarketDatum.create!(company: @company, as_of: Date.new(2026, 10, 12), share_price: 85.57, shares_diluted: 46.32, net_debt: 830.0)
+  end
+
+  teardown { @company.destroy }
+
+  test "NTM blends the fiscal year in progress and the next by the time remaining, deriving EBITDA at the current margin" do
+    ntm = Valuation.company_metrics("NTMX")[:ntm]
+    w = 80 / 365.25 # 12 October to 31 December 2026
+    assert_in_delta w, ntm[:weight_current_year], 1e-3
+    assert_in_delta w * 2388.1 + (1 - w) * 2553.2, ntm[:revenue], 0.06
+    assert_in_delta w * 6.42 + (1 - w) * 7.0, ntm[:eps], 0.006
+    assert ntm[:ebitda_derived]
+    assert_in_delta ntm[:revenue] * 0.15, ntm[:ebitda], 0.06, "FY2025 margin of 15% applied to NTM revenue"
+    ev = 85.57 * 46.32 + 830.0
+    assert_in_delta ev / ntm[:ebitda], ntm[:ev_ebitda], 0.006
+    assert_in_delta 85.57 / ntm[:eps], ntm[:pe], 0.006
+    assert_equal [2026, 2027], ntm[:fiscal_years]
+    assert_equal "consensus (Yahoo Finance, 9 analysts)", ntm[:source]
+  end
+
+  test "NTM is nil without an estimate beyond the current year" do
+    Financial.where(company: @company, is_estimate: true).delete_all
+    assert_nil Valuation.company_metrics("NTMX")[:ntm]
+    row = Valuation.comps_table(%w[NTMX])[:rows].first
+    assert_nil row[:ev_ebitda_ntm]
+    assert_equal 0, Valuation.comps_table(%w[NTMX])[:stats][:ev_ebitda_ntm][:count]
+  end
+
+  test "a price date past the current fiscal year end rolls NTM to the next year" do
+    @company.market_datum.update!(as_of: Date.new(2027, 1, 15))
+    ntm = Valuation.company_metrics("NTMX")[:ntm]
+    assert_equal [2027], ntm[:fiscal_years], "FY2026 is over; only FY2027 lies ahead"
+    assert_in_delta 2553.2, ntm[:revenue], 0.06
+  end
+end
 
 class ValuationUnknownNetDebtTest < ActiveSupport::TestCase
   setup do

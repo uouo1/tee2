@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_10_17_110000) do
+ActiveRecord::Schema[8.1].define(version: 2026_10_17_120000) do
   create_table "backtest_runs", force: :cascade do |t|
     t.string "name", null: false
     t.text "params", default: "{}", null: false
@@ -104,6 +104,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_17_110000) do
     t.float "tax_rate"
     t.string "period_type", default: "FY", null: false
     t.date "period_end"
+    t.string "estimate_source"
     t.index ["company_id", "fiscal_year", "period_type"], name: "index_financials_on_company_id_and_fiscal_year_and_period_type", unique: true
     t.index ["company_id"], name: "index_financials_on_company_id"
   end

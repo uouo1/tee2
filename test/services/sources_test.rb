@@ -550,7 +550,7 @@ class SourcesTest < ActiveSupport::TestCase
     result = nil
     stubbing(Sources::Sec, resolve_cik: ->(_t) { "0000780571" }, fetch_submissions: ->(_c) { submissions_fixture },
                            fetch_facts: ->(_c) { facts }) do
-      stubbing(Sources::Market, fetch_quote: ->(_t, **) { quote_fixture }) do
+      stubbing(Sources::Market, fetch_quote: ->(_t, **) { quote_fixture }, fetch_estimates: ->(_t, **) { nil }) do
         result = Sources::Sec.load_company("itri", with_documents: false)
       end
     end
@@ -602,7 +602,7 @@ class SourcesTest < ActiveSupport::TestCase
     2.times do |run|
       stubbing(Sources::Sec, resolve_cik: ->(_t) { "0000780571" }, fetch_submissions: ->(_c) { submissions_fixture },
                              fetch_facts: ->(_c) { facts_fixture }) do
-        stubbing(Sources::Market, fetch_quote: ->(_t, **) { quote_fixture }) do
+        stubbing(Sources::Market, fetch_quote: ->(_t, **) { quote_fixture }, fetch_estimates: ->(_t, **) { nil }) do
           Sources::Sec.load_company("ITRI", sector: "Industrial Technology #{run}", with_documents: false)
         end
       end
@@ -624,7 +624,7 @@ class SourcesTest < ActiveSupport::TestCase
     )
     stubbing(Sources::Sec, resolve_cik: ->(_t) { "0000780571" }, fetch_submissions: ->(_c) { submissions_fixture },
                            fetch_facts: ->(_c) { facts }) do
-      stubbing(Sources::Market, fetch_quote: ->(_t, **) { quote_fixture }) do
+      stubbing(Sources::Market, fetch_quote: ->(_t, **) { quote_fixture }, fetch_estimates: ->(_t, **) { nil }) do
         Sources::Sec.load_company("ITRI", with_documents: false)
       end
     end
@@ -643,7 +643,7 @@ class SourcesTest < ActiveSupport::TestCase
     result = nil
     stubbing(Sources::Sec, resolve_cik: ->(_t) { "0000780571" }, fetch_submissions: ->(_c) { submissions_fixture },
                            fetch_facts: ->(_c) { facts }) do
-      stubbing(Sources::Market, fetch_quote: ->(_t, **) { quote_fixture }) do
+      stubbing(Sources::Market, fetch_quote: ->(_t, **) { quote_fixture }, fetch_estimates: ->(_t, **) { nil }) do
         result = Sources::Sec.load_company("ITRI", with_documents: false)
       end
     end
@@ -658,10 +658,82 @@ class SourcesTest < ActiveSupport::TestCase
     assert_equal "10-Q", market.balance_sheet_form
   end
 
+  def estimates_payload_fixture
+    { quoteSummary: { result: [{
+      earningsTrend: { trend: [
+        { period: "0q", endDate: "2026-09-30", revenueEstimate: { avg: { raw: 595_476_000 }, numberOfAnalysts: { raw: 10 } }, earningsEstimate: { avg: { raw: 1.55617 } } },
+        { period: "0y", endDate: "2026-12-31", revenueEstimate: { avg: { raw: 2_388_120_370 }, numberOfAnalysts: { raw: 9 } }, earningsEstimate: { avg: { raw: 6.41503 } } },
+        { period: "+1y", endDate: "2027-12-31", revenueEstimate: { avg: { raw: 2_553_173_750 }, numberOfAnalysts: { raw: 9 } }, earningsEstimate: { avg: { raw: 6.99504 } } },
+        { period: "+5y", endDate: nil, earningsEstimate: {} }
+      ] },
+      defaultKeyStatistics: { beta: { raw: 1.321 }, sharesOutstanding: { raw: 43_786_753 } }
+    }] } }
+  end
+
+  test "consensus estimates parse to fiscal-year rows in millions with their analyst count and beta" do
+    parsed = Sources::Market.parse_estimates(estimates_payload_fixture, ticker: "itri", on: Date.new(2026, 10, 17))
+    assert_equal "ITRI", parsed[:ticker]
+    assert_equal [2026, 2027], parsed[:estimates].map { |e| e[:fiscal_year] }
+    first = parsed[:estimates].first
+    assert_equal Date.new(2026, 12, 31), first[:period_end]
+    assert_equal 2388.1, first[:revenue]
+    assert_equal 6.42, first[:eps]
+    assert_equal 9, first[:analysts]
+    assert_equal "consensus (Yahoo Finance, 9 analysts)", first[:source]
+    assert_in_delta 1.321, parsed[:beta]
+    assert_equal Date.new(2026, 10, 17), parsed[:as_of]
+    assert_nil Sources::Market.parse_estimates({ quoteSummary: { result: nil } }, ticker: "X")
+  end
+
+  test "fetch_estimates caches the parsed payload per ticker and day and never raises" do
+    Dir.mktmpdir do |dir|
+      Sources::Http.cache_dir = Pathname(dir)
+      calls = 0
+      stubbing(Sources::Market, estimates_payload: ->(_t) { calls += 1; estimates_payload_fixture }) do
+        first = Sources::Market.fetch_estimates("ITRI", on: Date.new(2026, 10, 17))
+        again = Sources::Market.fetch_estimates("ITRI", on: Date.new(2026, 10, 17))
+        assert_equal first, again
+        assert_equal 1, calls, "the second call on the same day is served from the cache"
+        Sources::Market.fetch_estimates("ITRI", on: Date.new(2026, 10, 18))
+        assert_equal 2, calls, "a new day refetches"
+        refute Dir.children(dir).any? { |f| File.read(File.join(dir, f)).include?("crumb") }, "the crumb is never cached"
+      end
+      stubbing(Sources::Market, estimates_payload: ->(_t) { raise Sources::Http::Error, "boom" }) do
+        assert_nil Sources::Market.fetch_estimates("FAIL", on: Date.new(2026, 10, 17))
+      end
+    ensure
+      Sources::Http.cache_dir = nil
+    end
+  end
+
+  test "load company stores consensus estimate rows for unreported years and the beta" do
+    estimates = Sources::Market.parse_estimates(estimates_payload_fixture, ticker: "ITRI", on: Date.new(2026, 10, 17))
+    result = nil
+    stubbing(Sources::Sec, resolve_cik: ->(_t) { "0000780571" }, fetch_submissions: ->(_c) { submissions_fixture },
+                           fetch_facts: ->(_c) { facts_fixture }) do
+      stubbing(Sources::Market, fetch_quote: ->(_t, **) { quote_fixture }, fetch_estimates: ->(_t, **) { estimates }) do
+        result = Sources::Sec.load_company("ITRI", with_documents: false)
+      end
+    end
+    company = Company.find_ticker("ITRI")
+    rows = company.financials.order(:fiscal_year, :period_type)
+    assert_equal [[2024, "FY", false], [2025, "FY", false], [2026, "FY", true], [2027, "FY", true]],
+                 rows.map { |r| [r.fiscal_year, r.period_type, r.is_estimate] }
+    estimate = rows.find_by(fiscal_year: 2026)
+    assert_equal 2388.1, estimate.revenue
+    assert_equal 6.42, estimate.eps
+    assert_nil estimate.ebitda, "no consensus EBITDA is published; Valuation derives it and says so"
+    assert_equal Date.new(2026, 12, 31), estimate.period_end
+    assert_equal "consensus (Yahoo Finance, 9 analysts)", estimate.estimate_source
+    assert_in_delta 1.321, company.market_datum.beta
+    assert_equal [2026, 2027], result[:estimate_years]
+    assert_equal [2024, 2025], result[:fiscal_years], "the summary's fiscal years are the reported ones"
+  end
+
   test "load company skips market data without a quote or share count" do
     stubbing(Sources::Sec, resolve_cik: ->(_t) { "0000780571" }, fetch_submissions: ->(_c) { submissions_fixture },
                            fetch_facts: ->(_c) { facts_fixture }) do
-      result = Sources::Sec.load_company("ITRI", with_documents: false, with_quote: false)
+      result = Sources::Sec.load_company("ITRI", with_documents: false, with_quote: false, with_estimates: false)
       assert_nil result[:share_price]
       assert_nil result[:quote_as_of]
       assert_nil Company.find_ticker("ITRI").market_datum
@@ -675,7 +747,7 @@ class SourcesTest < ActiveSupport::TestCase
     stubbing(Sources::Sec, resolve_cik: ->(_t) { "0000780571" }, fetch_submissions: ->(_c) { submissions_fixture },
                            fetch_facts: ->(_c) { facts_fixture }, collect_documents: ->(*, **) { documents }) do
       stubbing(Ingest, ingest_many: ->(docs) { received = docs; { added: 1, skipped: 0 } }) do
-        result = Sources::Sec.load_company("ITRI", with_quote: false)
+        result = Sources::Sec.load_company("ITRI", with_quote: false, with_estimates: false)
       end
     end
     assert_equal documents, received
