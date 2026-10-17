@@ -157,83 +157,81 @@ def ntm_estimates(
     *,
     enterprise_value: float | None,
     price: float,
-    margin_row: dict[str, Any] | None = None,
+    basis: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Calendarise fiscal-year estimates to the next twelve months from ``as_of``.
+    """Next-twelve-months figures, calendarised the way a comps page does it.
 
-    Forward multiples are quoted on NTM, not on whichever fiscal year happens to
-    be next: on 9 October a December filer's FY0 estimate is three-quarters
-    history. FY0 is the first estimate year whose period end falls after
-    ``as_of`` (a missing period end is read as 31 December of the fiscal year);
-    its weight is the fraction of that fiscal year still ahead, and FY1 — the
-    following fiscal year — carries the rest. With no FY1, FY0 stands alone.
+    A port of the Rails ``Valuation.ntm_metrics`` (the specification). FY0 is
+    the fiscal year IN PROGRESS at ``as_of``: the first fiscal row, reported or
+    estimated, whose period end (31 December of its year when the row has no
+    date) falls after ``as_of``; FY1 is the fiscal year after it. Their weights
+    are the share of FY0 still ahead, ``days left / 365.25``, and the rest.
+    Only estimate rows used to qualify, so on the seed (FY2026 reported, a 9
+    October price date) NTM was FY2027 alone — a year that had not started —
+    instead of 22.7% FY2026 and 77.3% FY2027.
 
-    EBITDA is the blended consensus figure when the estimate rows carry one;
-    otherwise NTM revenue times the freshest reported EBITDA margin
-    (``margin_row``: LTM, else the latest fiscal year), flagged
-    ``ebitda_derived`` so nobody mistakes it for a consensus number.
-    None when there are no estimates ahead of ``as_of``.
+    Revenue and EPS come from the rows; EBITDA too when a row carries it,
+    otherwise NTM revenue times the ``basis`` row's EBITDA margin (LTM, else
+    the latest fiscal year), flagged ``ebitda_derived``, because no public
+    source publishes consensus EBITDA. A figure FY1 lacks falls back to FY0's.
+    None when no fiscal year ends after ``as_of``, or when FY0 is a reported
+    year with nothing estimated after it (there is no forward view).
+    LTM rows are ignored: they are not fiscal years.
     """
-    estimates = sorted(
-        (f for f in financials if f.get("is_estimate") and _period_type(f) == "FY"),
+    rows = sorted(
+        (f for f in financials if _period_type(f) == "FY"),
         key=lambda f: int(f.get("fiscal_year") or 0),
     )
-    if not estimates:
+    if not rows:
         return None
     as_of_date = _to_date(as_of) or date.today()
 
     def period_end(row: dict[str, Any]) -> date:
         return _to_date(row.get("period_end")) or date(int(row["fiscal_year"]), 12, 31)
 
-    ahead = [row for row in estimates if period_end(row) > as_of_date]
-    if not ahead or not ahead[0].get("revenue"):
+    current = next((row for row in rows if period_end(row) > as_of_date), None)
+    if current is None:
         return None
-    fy0 = ahead[0]
-    fy1 = next((row for row in ahead[1:] if int(row["fiscal_year"]) == int(fy0["fiscal_year"]) + 1), None)
-    if fy1 is not None and not fy1.get("revenue"):
-        fy1 = None  # an estimate year without revenue cannot carry the blend
+    following = next((row for row in rows if int(row["fiscal_year"]) == int(current["fiscal_year"]) + 1), None)
+    if following is None and not current.get("is_estimate"):
+        return None
 
-    end0 = period_end(fy0)
-    year_days = (end0 - _add_years(end0, -1)).days
-    remaining = max(0.0, min(1.0, (end0 - as_of_date).days / year_days))
-    weight = remaining if fy1 is not None else 1.0
+    weight = max(0.0, min(1.0, (period_end(current) - as_of_date).days / 365.25))
 
     def blend(key: str) -> float | None:
-        current = fy0.get(key)
-        if not current:
+        first = current.get(key)
+        if first is None:
             return None
-        if fy1 is None:
-            return float(current)
-        following = fy1.get(key)
-        if not following:
-            return None
-        return weight * float(current) + (1 - weight) * float(following)
+        second = following.get(key) if following is not None else None
+        if second is None:
+            return float(first)
+        return weight * float(first) + (1 - weight) * float(second)
 
     revenue = blend("revenue")
+    eps = blend("eps")
     ebitda = blend("ebitda")
     derived = False
-    if ebitda is None:
-        margin_revenue = float((margin_row or {}).get("revenue") or 0.0)
-        margin_ebitda = float((margin_row or {}).get("ebitda") or 0.0)
-        if margin_revenue and margin_ebitda:
-            ebitda = revenue * margin_ebitda / margin_revenue
-            derived = True
-    eps = blend("eps")
-
-    used = [fy0] + ([fy1] if fy1 is not None else [])
-    sources = sorted({str(row["estimate_source"]) for row in used if row.get("estimate_source")})
+    margin = (basis or {}).get("ebitda_margin")
+    if ebitda is None and revenue is not None and margin is not None:
+        ebitda = revenue * float(margin)
+        derived = True
+    source = (
+        (following or {}).get("estimate_source") or current.get("estimate_source") or "estimate rows"
+    )
     return {
-        "revenue": round(revenue, 1),
+        "revenue": round(revenue, 1) if revenue is not None else None,
         "ebitda": round(ebitda, 1) if ebitda is not None else None,
         "ebitda_derived": derived,
         "eps": round(eps, 2) if eps is not None else None,
-        "ev_revenue": round(enterprise_value / revenue, 2) if enterprise_value is not None else None,
+        "ev_revenue": round(enterprise_value / revenue, 2) if revenue and enterprise_value is not None else None,
         "ev_ebitda": round(enterprise_value / ebitda, 2) if ebitda and enterprise_value is not None else None,
-        "pe": round(price / eps, 2) if eps else None,
+        "pe": round(price / eps, 2) if eps and price else None,
         "weight_current_year": round(weight, 4),
-        "fiscal_years": [fy0["fiscal_year"], fy1["fiscal_year"] if fy1 is not None else None],
+        "fiscal_years": [current["fiscal_year"]] + ([following["fiscal_year"]] if following is not None else []),
+        "period_end": _add_years(as_of_date, 1).isoformat(),
         "as_of": as_of_date.isoformat(),
-        "source": " / ".join(sources) if sources else "estimates",
+        "source": str(source),
+        "label": "NTM",
     }
 
 
@@ -335,8 +333,8 @@ def company_metrics(conn: sqlite3.Connection, ticker: str, *, forward_years: int
         "basis_label": basis_label(basis_row),
         "forward": forwards,
         "ntm": ntm_estimates(
-            financials, market.get("as_of"),
-            enterprise_value=enterprise_value, price=price, margin_row=basis_row,
+            fiscal, market.get("as_of"),
+            enterprise_value=enterprise_value, price=price, basis=multiples_for(basis_row),
         ),
         "financials": financials,
     }
@@ -922,15 +920,16 @@ def football_field(
     if target_ntm and target_ntm.get("ebitda") and comp_ntm["count"] >= MIN_NTM_PEERS:
         implied = implied_from_multiple(comp_ntm["p25"], comp_ntm["p75"], metric_value=target_ntm["ebitda"], **bridge)
         if implied:
-            years = "/".join(f"FY{y}" for y in target_ntm["fiscal_years"] if y is not None)
+            derivation = "consensus revenue at the current margin" if target_ntm["ebitda_derived"] else "estimate rows"
             ranges.append(ValuationRange(
                 "Trading comps — NTM EV/EBITDA", implied["low"], implied["high"],
-                basis=(
+                basis=(  # Rails wording
                     f"{implied['multiple_low']}x–{implied['multiple_high']}x on NTM EBITDA of "
-                    f"{implied['metric_value']:.0f} ({years} estimates, {comp_ntm['count']} peers)"
+                    f"{implied['metric_value']:.0f} ({derivation}; {comp_ntm['count']} peers)"
                 ),
-                detail={**implied, "weight_current_year": target_ntm["weight_current_year"],
-                        "fiscal_years": target_ntm["fiscal_years"], "ebitda_derived": target_ntm["ebitda_derived"]},
+                detail={**implied, "ebitda_derived": target_ntm["ebitda_derived"], "source": target_ntm["source"],
+                        "weight_current_year": target_ntm["weight_current_year"],
+                        "fiscal_years": target_ntm["fiscal_years"]},
                 note=(
                     f"Target NTM EBITDA derived from NTM revenue at the {label} margin (no EBITDA estimate loaded)."
                     if target_ntm["ebitda_derived"] else None

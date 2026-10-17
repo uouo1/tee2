@@ -399,9 +399,10 @@ def _slide_flowables(slide: dict[str, Any], styles: dict[str, ParagraphStyle]) -
             flow.append(Paragraph(payload["note"], styles["note"]))
     elif kind == "dcf_sensitivity":
         flow.append(_heatmap_table(payload))
+        price = payload.get("reference_price")  # None when no price was loaded
         flow.append(Paragraph(
             f"Value per share ({currency}); current share price "
-            f"{_symbol(currency)}{payload.get('reference_price', 0):,.2f}.", styles["note"]))
+            + (f"{_symbol(currency)}{float(price):,.2f}." if price is not None else "not loaded."), styles["note"]))
     elif kind == "buyers":
         flow.append(_table_flowable(
             [

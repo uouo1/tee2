@@ -511,13 +511,20 @@ def _slide_dcf(prs, slide_data: dict[str, Any]) -> None:
         series_name=f"Unlevered FCF ({currency}m)",
     )
     symbol = _symbol(currency)
+
+    def money(key: str, pattern: str, suffix: str = "") -> str:
+        # Equity value and value per share are None when net debt is unknown
+        # (valuation contract): say so instead of crashing on f"{None:,.0f}".
+        value = payload.get(key)
+        return "not bridged" if value is None else f"{symbol}{pattern.format(float(value))}{suffix}"
+
     bridge = [
-        ("PV of forecast FCF", f"{symbol}{payload.get('pv_explicit', 0):,.0f}m"),
-        ("PV of terminal value", f"{symbol}{payload.get('pv_terminal', 0):,.0f}m"),
-        ("Enterprise value", f"{symbol}{payload.get('enterprise_value', 0):,.0f}m"),
-        ("Equity value", f"{symbol}{payload.get('equity_value', 0):,.0f}m"),
-        ("Value per share", f"{symbol}{payload.get('value_per_share', 0):,.2f}"),
-        ("Current share price", f"{symbol}{payload.get('share_price', 0):,.2f}"),
+        ("PV of forecast FCF", money("pv_explicit", "{:,.0f}", "m")),
+        ("PV of terminal value", money("pv_terminal", "{:,.0f}", "m")),
+        ("Enterprise value", money("enterprise_value", "{:,.0f}", "m")),
+        ("Equity value", money("equity_value", "{:,.0f}", "m")),
+        ("Value per share", money("value_per_share", "{:,.2f}")),
+        ("Current share price", money("share_price", "{:,.2f}")),
     ]
     shape = slide.shapes.add_table(len(bridge), 2, Inches(7.0), CONTENT_TOP, Inches(5.7), Inches(0.33) * len(bridge))
     for index, (label, value) in enumerate(bridge):
@@ -553,10 +560,11 @@ def _slide_sensitivity(prs, slide_data: dict[str, Any]) -> None:
     _heading(slide, slide_data.get("title", ""), slide_data.get("subtitle"))
     _add_heatmap_table(slide, slide_data.get("payload", {}))
     payload = slide_data.get("payload", {})
+    price = payload.get("reference_price")
     _note(
         slide,
         f"Value per share ({payload.get('currency', 'USD')}); current share price "
-        f"{_symbol(payload.get('currency'))}{payload.get('reference_price', 0):,.2f}.",
+        + (f"{_symbol(payload.get('currency'))}{float(price):,.2f}." if price is not None else "not loaded."),
         top=Inches(5.0),
     )
 

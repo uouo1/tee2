@@ -296,20 +296,24 @@ class NtmTests(unittest.TestCase):
             estimate(2026, 1000.0, 200.0, 2.0, source="consensus"),
             estimate(2027, 1200.0, 300.0, 2.5),
         ])["ntm"]
-        # 9 Oct 2026: 22 + 30 + 31 = 83 of FY2026's 365 days remain, w = 0.227397.
-        w = 83 / 365
-        self.assertEqual(ntm["weight_current_year"], 0.2274)
+        # 9 Oct 2026: 22 + 30 + 31 = 83 days of FY2026 remain. Integration: the
+        # Rails spec divides by 365.25 (was the fiscal year's 365 days, w 0.2274),
+        # so w = 83 / 365.25 = 0.227242.
+        w = 83 / 365.25
+        self.assertEqual(ntm["weight_current_year"], 0.2272)
         self.assertEqual(ntm["fiscal_years"], [2026, 2027])
-        self.assertEqual(ntm["revenue"], 1154.5)    # 1,200 - 200w = 1,154.52
-        self.assertEqual(ntm["ebitda"], 277.3)      # 300 - 100w = 277.26
+        self.assertEqual(ntm["revenue"], 1154.6)    # 1,200 - 200w = 1,154.55 (was 1,154.5 at w 0.2274)
+        self.assertEqual(ntm["ebitda"], 277.3)      # 300 - 100w = 277.28
         self.assertEqual(ntm["eps"], 2.39)          # 2.5 - 0.5w = 2.386
         self.assertFalse(ntm["ebitda_derived"])
-        self.assertEqual(ntm["ev_ebitda"], round(5000 / (300 - 100 * w), 2))  # 18.03
+        self.assertEqual(ntm["ev_ebitda"], round(5000 / (300 - 100 * w), 2))  # 5,000 / 277.28 = 18.03
         self.assertEqual(ntm["ev_ebitda"], 18.03)
         self.assertEqual(ntm["ev_revenue"], 4.33)
         self.assertEqual(ntm["pe"], round(50 / (2.5 - 0.5 * w), 2))
         self.assertEqual(ntm["source"], "consensus")
         self.assertEqual(ntm["as_of"], "2026-10-09")
+        self.assertEqual(ntm["period_end"], "2027-10-09")  # Rails: as_of >> 12
+        self.assertEqual(ntm["label"], "NTM")
 
     def test_june_year_end_uses_its_own_period_end(self):
         ntm = self.metrics([
@@ -317,9 +321,10 @@ class NtmTests(unittest.TestCase):
             estimate(2027, 1000.0, 200.0, period_end="2027-06-30"),
             estimate(2028, 1100.0, 230.0, period_end="2028-06-30"),
         ])["ntm"]
-        # 22 + 30 + 31 + 31 + 28 + 31 + 30 + 31 + 30 = 264 of 365 days of FY2027 remain.
-        self.assertEqual(ntm["weight_current_year"], 0.7233)
-        self.assertEqual(ntm["revenue"], 1027.7)    # 1,100 - 100 x 0.72329 = 1,027.67
+        # 22 + 30 + 31 + 31 + 28 + 31 + 30 + 31 + 30 = 264 days of FY2027 remain.
+        # Integration (Rails divides by 365.25; was 264/365 = 0.7233): 0.722793.
+        self.assertEqual(ntm["weight_current_year"], 0.7228)
+        self.assertEqual(ntm["revenue"], 1027.7)    # 1,100 - 100 x 0.722793 = 1,027.72
         self.assertEqual(ntm["fiscal_years"], [2027, 2028])
 
     def test_missing_ebitda_estimate_is_derived_from_the_reported_margin_and_flagged(self):
@@ -329,27 +334,69 @@ class NtmTests(unittest.TestCase):
             estimate(2027, 1200.0, None, 2.5),
         ])["ntm"]
         self.assertTrue(ntm["ebitda_derived"])
-        self.assertEqual(ntm["ebitda"], 230.9)      # 1,154.52 x (180 / 900)
+        self.assertEqual(ntm["ebitda"], 230.9)      # 1,154.55 x (180 / 900 = 0.2) = 230.91
 
     def test_without_fy1_fy0_stands_alone(self):
         ntm = self.metrics([fy(2025, 900.0), estimate(2026, 1000.0, 200.0)])["ntm"]
         self.assertEqual(ntm["revenue"], 1000.0)
-        self.assertEqual(ntm["weight_current_year"], 1.0)
-        self.assertEqual(ntm["fiscal_years"], [2026, None])
+        # Integration (Rails): the weight is reported as computed (83 / 365.25)
+        # even though FY0 stands alone, and fiscal_years lists only the years
+        # used (was 1.0 and [2026, None]).
+        self.assertEqual(ntm["weight_current_year"], 0.2272)
+        self.assertEqual(ntm["fiscal_years"], [2026])
+
+    def test_reported_year_in_progress_with_nothing_after_gives_no_ntm(self):
+        # Rails: no forward view when FY0 is reported and no FY1 row exists.
+        self.assertIsNone(self.metrics([fy(2025, 900.0), fy(2026, 1000.0)])["ntm"])
+
+    def test_rails_ntmx_case(self):
+        # Ported from Rails ValuationNtmTest: consensus revenue/EPS without EBITDA.
+        metrics = self.metrics([
+            fy(2025, 2400.0, 360.0, eps=5.0),
+            estimate(2026, 2388.1, None, 6.42, source="consensus (Yahoo Finance, 9 analysts)"),
+            estimate(2027, 2553.2, None, 7.0, source="consensus (Yahoo Finance, 9 analysts)"),
+        ], {"as_of": "2026-10-12", "share_price": 85.57, "shares_diluted": 46.32, "net_debt": 830.0})
+        ntm = metrics["ntm"]
+        w = 80 / 365.25  # 12 Oct -> 31 Dec 2026
+        self.assertEqual(ntm["weight_current_year"], round(w, 4))           # 0.219
+        self.assertEqual(ntm["revenue"], round(w * 2388.1 + (1 - w) * 2553.2, 1))  # 2517.0
+        self.assertEqual(ntm["eps"], round(w * 6.42 + (1 - w) * 7.0, 2))    # 6.87
+        self.assertTrue(ntm["ebitda_derived"])
+        self.assertEqual(ntm["ebitda"], round(ntm["revenue"] * 0.15, 1))    # FY2025 margin 360 / 2400
+        ev = 85.57 * 46.32 + 830.0
+        self.assertAlmostEqual(ntm["ev_ebitda"], ev / ntm["ebitda"], delta=0.006)
+        self.assertAlmostEqual(ntm["pe"], 85.57 / ntm["eps"], delta=0.006)
+        self.assertEqual(ntm["fiscal_years"], [2026, 2027])
+        self.assertEqual(ntm["source"], "consensus (Yahoo Finance, 9 analysts)")
+
+    def test_price_date_past_the_year_end_rolls_ntm_forward(self):
+        ntm = self.metrics([
+            fy(2025, 2400.0, 360.0),
+            estimate(2026, 2388.1, None, 6.42),
+            estimate(2027, 2553.2, None, 7.0),
+        ], {"as_of": "2027-01-15", "share_price": 85.57, "shares_diluted": 46.32, "net_debt": 830.0})["ntm"]
+        self.assertEqual(ntm["fiscal_years"], [2027])
+        self.assertEqual(ntm["revenue"], 2553.2)
 
     def test_no_estimates_or_only_stale_ones_give_no_ntm(self):
         self.assertIsNone(self.metrics([fy(2025, 900.0)])["ntm"])
         self.assertIsNone(self.metrics([fy(2024, 900.0), estimate(2025, 1000.0, 200.0)])["ntm"])
 
     def test_seed_without_period_end_reads_31_december(self):
-        # The demo seed marks FY2026 as actual at a 9 Oct 2026 price date, so the
-        # first estimate year (FY2027) has not started: it carries all the weight.
+        # The demo seed marks FY2026 (no period end -> 31 Dec 2026) as reported at
+        # a 9 Oct 2026 price date. Integration (Rails ntm_metrics): the year in
+        # progress counts whether reported or estimated, so NTM is 22.7% FY2026
+        # and 77.3% FY2027 (was FY2027 alone, a year that had not started).
         metrics = valuation.company_metrics(seeded_connection(), "NVG")
         ntm = metrics["ntm"]
-        self.assertEqual(ntm["fiscal_years"], [2027, 2028])
-        self.assertEqual(ntm["weight_current_year"], 1.0)
-        fy2027 = next(f for f in metrics["financials"] if f["fiscal_year"] == 2027)
-        self.assertEqual(ntm["revenue"], round(fy2027["revenue"], 1))
+        self.assertEqual(ntm["fiscal_years"], [2026, 2027])
+        self.assertEqual(ntm["weight_current_year"], 0.2272)   # 83 / 365.25
+        self.assertFalse(ntm["ebitda_derived"])                # the seed rows carry EBITDA
+        rows = {f["fiscal_year"]: f for f in metrics["financials"]}
+        w = 83 / 365.25
+        self.assertAlmostEqual(ntm["ebitda"], w * rows[2026]["ebitda"] + (1 - w) * rows[2027]["ebitda"], delta=0.06)
+        self.assertEqual(ntm["ebitda"], 539.9)
+        self.assertEqual(ntm["ev_ebitda"], 15.63)              # 8,436.2 / 539.9
 
     def test_comps_rows_and_statistics_carry_ntm_multiples(self):
         table = valuation.comps_table(seeded_connection(), COMPS)
@@ -804,7 +851,16 @@ class FootballFieldTests(unittest.TestCase):
         )
         self.assertEqual((bar["low"], bar["high"]), (expected["low"], expected["high"]))
         self.assertIn("NTM EBITDA", bar["basis"])
-        self.assertIn("FY2027/FY2028", bar["basis"])
+        # Integration (Rails ntm_metrics is the spec): FY2026 is the year in
+        # progress at 9 Oct 2026, so the blend is FY2026/FY2027, not FY2027/FY2028,
+        # and the basis carries the Rails wording.
+        self.assertEqual(bar["basis"], "11.5x–15.76x on NTM EBITDA of 540 (estimate rows; 6 peers)")
+        self.assertEqual((bar["low"], bar["high"]), (31.86, 44.5))
+
+    def test_concluded_range_matches_the_rails_reference(self):
+        # Rails valuation_test.rb pins 31.03-44.8 with the NTM bar; the Python
+        # build gave 31.26-44.72 while its NTM skipped the year in progress.
+        self.assertEqual((self.field["concluded_range"]["low"], self.field["concluded_range"]["high"]), (31.03, 44.8))
 
     def test_52_week_range_is_reference_only(self):
         week = self.by_method["52-week trading range"]

@@ -138,8 +138,15 @@ def _us_gaap(facts: dict[str, Any]) -> dict[str, Any]:
     return (facts.get("facts") or {}).get("us-gaap") or {}
 
 
+# A preferred tag carrying less than this share of another tag's value for the
+# same year is a sub-line, not the total: Charter tags one revenue stream
+# (889m) under RevenueFromContractWithCustomerIncludingAssessedTax while
+# Revenues holds the 55bn total. Only the revenue concept uses the guard.
+SUB_LINE_RATIO = 0.2
+
+
 def duration_entries(
-    facts: dict[str, Any], names: Sequence[str], *, unit: str = "USD"
+    facts: dict[str, Any], names: Sequence[str], *, unit: str = "USD", sub_line_guard: bool = False,
 ) -> dict[int, dict[str, Any]]:
     """Annual observations by fiscal year for a duration concept.
 
@@ -151,9 +158,14 @@ def duration_entries(
     switch and, for Xylem, dropped the whole current-debt line (audit finding,
     docs/RAILS_PORT.md item 11). Within a tag the most recently filed value
     wins: restatements.
+
+    With ``sub_line_guard`` a year's preferred value that is under
+    :data:`SUB_LINE_RATIO` of the largest value any listed tag carries for
+    that year yields to the largest: preference order alone let a sub-line
+    stand in for total revenue (Charter, ported from the Rails loader).
     """
     us_gaap = _us_gaap(facts)
-    out: dict[int, dict[str, Any]] = {}
+    by_tag: list[dict[int, dict[str, Any]]] = []
     for name in names:
         per_tag: dict[int, dict[str, Any]] = {}
         for entry in (us_gaap.get(name) or {}).get("units", {}).get(unit, []) or []:
@@ -170,8 +182,18 @@ def duration_entries(
             filed = str(entry.get("filed") or "")
             if year not in per_tag or filed > per_tag[year]["filed"]:
                 per_tag[year] = {"value": float(entry["val"]), "period_end": finish, "filed": filed, "tag": name}
+        by_tag.append(per_tag)
+    out: dict[int, dict[str, Any]] = {}
+    for per_tag in by_tag:
         for year, row in per_tag.items():
             out.setdefault(year, row)
+    if not sub_line_guard:
+        return out
+    for year, row in out.items():
+        candidates = [per_tag[year] for per_tag in by_tag if year in per_tag]
+        largest = max(candidates, key=lambda c: abs(c["value"]))
+        if abs(row["value"]) < abs(largest["value"]) * SUB_LINE_RATIO:
+            out[year] = largest
     return out
 
 
@@ -371,7 +393,10 @@ def build_financials(facts: dict[str, Any], *, years: int = 6) -> list[dict[str,
     :func:`ltm_row`). Amounts are converted to millions to match the rest of
     the application.
     """
-    entries = {key: duration_entries(facts, names) for key, names in TAGS.items() if key != "eps"}
+    entries = {
+        key: duration_entries(facts, names, sub_line_guard=key == "revenue")
+        for key, names in TAGS.items() if key != "eps"
+    }
     series = {key: {year: row["value"] for year, row in rows.items()} for key, rows in entries.items()}
     if not series["dep_amort"]:
         # Some filers (Badger Meter, for one) never tag a combined line.
@@ -421,13 +446,18 @@ def build_financials(facts: dict[str, Any], *, years: int = 6) -> list[dict[str,
             "nwc_change": round(nwc_change, 1) if nwc_change is not None else None,
             "tax_rate": round(tax_rate, 4) if tax_rate is not None else None,
         })
-    ltm = ltm_row(facts, rows[-1]) if rows else None
-    if ltm:
-        rows.append(ltm)
+    if rows:
+        last_year = rows[-1]["fiscal_year"]
+        fy_tags = {key: by_year[last_year]["tag"] for key, by_year in entries.items() if last_year in by_year}
+        ltm = ltm_row(facts, rows[-1], fy_tags=fy_tags)
+        if ltm:
+            rows.append(ltm)
     return rows
 
 
-def ltm_row(facts: dict[str, Any], fy_row: dict[str, Any]) -> dict[str, Any] | None:
+def ltm_row(
+    facts: dict[str, Any], fy_row: dict[str, Any], *, fy_tags: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
     """Trailing twelve months to the latest 10-Q after the last fiscal year.
 
     Fiscal year + current year-to-date − prior-year year-to-date, per flow.
@@ -440,17 +470,28 @@ def ltm_row(facts: dict[str, Any], fy_row: dict[str, Any]) -> dict[str, Any] | N
     it, since it barely moves within a year. Working capital is not rolled.
     Returns None when no 10-Q extends the last fiscal year or the prior-year
     comparable is missing.
+
+    ``fy_tags`` maps a flow to the tag its fiscal-year figure came from; that
+    tag is tried first so FY + YTD − prior YTD never mixes two definitions of
+    the line (Charter: an 889m FY sub-line rolled with the 27bn Revenues YTD
+    gave an LTM of 511m).
     """
+    fy_tags = fy_tags or {}
+
+    def tags_for(key: str) -> tuple[str, ...]:
+        own = fy_tags.get(key)
+        return ((own,) if own else ()) + tuple(t for t in TAGS[key] if t != own)
+
     fy_end = date.fromisoformat(str(fy_row["period_end"]))
-    revenue = latest_ytd(facts, TAGS["revenue"], after=fy_end)
+    revenue = latest_ytd(facts, tags_for("revenue"), after=fy_end)
     if revenue is None or revenue["prior_value"] is None:
         return None
 
     quarter_end = revenue["period_end"]
     ytd: dict[str, dict[str, Any] | None] = {"revenue": revenue}
     for key in ("operating_income", "dep_amort", "net_income", "capex"):
-        ytd[key] = latest_ytd(facts, TAGS[key], after=fy_end, period_end=quarter_end)
-    ytd["eps"] = latest_ytd(facts, TAGS["eps"], unit="USD/shares", after=fy_end, period_end=quarter_end)
+        ytd[key] = latest_ytd(facts, tags_for(key), after=fy_end, period_end=quarter_end)
+    ytd["eps"] = latest_ytd(facts, tags_for("eps"), unit="USD/shares", after=fy_end, period_end=quarter_end)
 
     def roll(key: str, fy_value: float | None, scale: float) -> float | None:
         current = ytd[key]

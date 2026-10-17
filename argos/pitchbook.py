@@ -16,11 +16,11 @@ because all three read the same payload.
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Sequence
 
-from . import analytics, nlp, search, valuation
-from .db import dump_json, insert, load_json, query, query_one
+from . import __version__, analytics, search, valuation
+from .db import dump_json, insert, load_json, query, query_one, scalar
 
 SLIDE_ORDER: tuple[tuple[str, str], ...] = (
     ("cover", "Cover"),
@@ -75,6 +75,272 @@ def _fmt_pct(value: float | None, digits: int = 1) -> str:
 
 def _fmt_x(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.1f}x"
+
+
+# ------------------------------------------------------- data-driven prose
+#
+# Every sentence below is computed from the numbers it quotes (audit,
+# docs/RAILS_PORT.md items 7 and 16-19). The reference deck carried fixed
+# adjectives — "modest" leverage whatever the ratio, a 22% margin threshold
+# standing in for the peer set, "upside" against a comps bar — which the
+# repository's own backtest gives no licence for. Where a number is unknown the
+# sentence says so or is skipped; "n/a" never appears inside prose.
+
+#: Margins within this many points of the peer median read as "in line".
+IN_LINE_MARGIN_POINTS = 0.02
+#: A peer must be at least this many times the target's EV, and below
+#: ``CAPACITY_MAX_LEVERAGE`` net debt / EBITDA, before the deck credits it
+#: with balance-sheet capacity: relative size alone said nothing about whether
+#: the buyer could fund a deal.
+CAPACITY_SIZE_MULTIPLE = 2.0
+CAPACITY_MAX_LEVERAGE = 3.0
+#: EV/EBITDA within this many turns of the target's reads as "similar".
+SIMILAR_MULTIPLE_TURNS = 1.0
+#: A theme must gain (and another lose) this share of documents before the
+#: market overview says the discussion "shifted".
+THEME_SHIFT_POINTS = 0.10
+
+EBITDA_DEFINITION = (
+    "EBITDA is GAAP operating income plus depreciation and amortisation, unadjusted: no add-backs for "
+    "stock-based compensation, restructuring or other items, for the target and every peer."
+)
+
+#: Filing boilerplate that the bigram model surfaces as "themes" on real
+#: 10-K/10-Q text ("loss net", "comprehensive income", "file reports"). A theme
+#: containing any of these words is dropped before it reaches prose.
+BOILERPLATE_TOKENS = frozenset({
+    "file", "files", "filed", "filing", "filings", "filer",
+    "rule", "rules", "provided", "provide", "provides",
+    "report", "reports", "reported", "reporting",
+    "stock", "stocks", "net", "loss", "losses", "income", "comprehensive",
+    "adjustment", "adjustments", "accounting", "n/a",
+})
+
+#: Words that describe a share price as having somewhere to go. The deck may
+#: state an implied range against the price, never a move (RAILS_PORT item 16).
+PROMOTIONAL_WORDS = ("upside", "price target")
+
+
+def _clean_theme(theme: Any) -> bool:
+    """True when a theme is a business topic rather than filing boilerplate."""
+    text = str(theme or "").strip().lower()
+    if len(text) < 5:
+        return False
+    return not any(word in BOILERPLATE_TOKENS for word in text.replace("/", " ").split())
+
+
+def filter_themes(rows: Sequence[Any], *, company_name: str | None = None) -> list[Any]:
+    """Drop boilerplate themes from either theme dicts or plain strings.
+
+    With ``company_name``, a theme made only of the company's own name words
+    ("meridian flow", "flow controls") is dropped too: it is a byline, not a
+    topic.
+    """
+    name_words = {w.lower().strip(".,&") for w in (company_name or "").split()} - {""}
+    kept = []
+    for row in rows:
+        theme = row.get("theme") if isinstance(row, dict) else row
+        if not _clean_theme(theme):
+            continue
+        if name_words and set(str(theme).lower().split()) <= name_words:
+            continue
+        kept.append(row)
+    return kept
+
+
+def _basis(metrics: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """The row multiples are quoted on (LTM when loaded) and its label.
+
+    Falls back to the last fiscal year when the valuation module predates the
+    LTM contract, so the deck still says which period a multiple belongs to.
+    """
+    row = metrics.get("valuation_basis") or metrics.get("latest_actual") or {}
+    label = metrics.get("basis_label")
+    if not label or label == "n/a":
+        label = f"FY{row['fiscal_year']}" if row.get("fiscal_year") else "latest fiscal year"
+    return row, label
+
+
+def leverage_profile(net_debt: float | None, ebitda: float | None) -> dict[str, Any]:
+    """Net debt / EBITDA and the band it falls in.
+
+    Bands: "unknown" (no balance sheet), "net cash", "EBITDA not positive",
+    "below 1x", "1–3x" (inclusive of 3.0x) and "above 3x".
+    """
+    if net_debt is None:
+        return {"band": "unknown", "ratio": None}
+    debt = float(net_debt)
+    positive_ebitda = ebitda is not None and float(ebitda) > 0
+    if debt <= 0:
+        return {"band": "net cash", "ratio": round(debt / float(ebitda), 2) if positive_ebitda else None}
+    if not positive_ebitda:
+        return {"band": "EBITDA not positive", "ratio": None}
+    ratio = debt / float(ebitda)
+    band = "below 1x" if ratio < 1 else ("1–3x" if ratio <= 3 else "above 3x")
+    return {"band": band, "ratio": round(ratio, 2)}
+
+
+def leverage_sentence(
+    net_debt: float | None, ebitda: float | None, basis_label: str, currency: str, *, as_of: str | None = None,
+) -> str:
+    """One sentence on balance-sheet leverage, phrased from its band."""
+    profile = leverage_profile(net_debt, ebitda)
+    band = profile["band"]
+    dated = f" at {as_of}" if as_of else ""
+    if band == "unknown":
+        return "Net debt is not reported on the latest balance sheet loaded, so leverage capacity is not assessed."
+    if band == "net cash":
+        against = f" against {basis_label} EBITDA of {_fmt_money(ebitda, currency)}" if ebitda is not None else ""
+        return (
+            f"Net cash of {_fmt_money(-float(net_debt), currency)}{dated}{against}: the balance sheet carries no "
+            "net debt, so any leveraged structure starts from net cash."
+        )
+    if band == "EBITDA not positive":
+        return (
+            f"Net debt of {_fmt_money(net_debt, currency)}{dated} sits against non-positive {basis_label} EBITDA, "
+            "so leverage capacity cannot be measured on earnings."
+        )
+    consequence = {
+        "below 1x": "leaving room for a leveraged structure",
+        "1–3x": "leaving some room for incremental leverage",
+        "above 3x": "which constrains incremental leverage",
+    }[band]
+    # Format the exact ratio: the 2dp payload value double-rounds (0.8504 -> 0.85 -> "0.8x").
+    return (
+        f"Net debt of {_fmt_money(net_debt, currency)}{dated} is {float(net_debt) / float(ebitda):.1f}x {basis_label} EBITDA of "
+        f"{_fmt_money(ebitda, currency)} ({band}), {consequence}."
+    )
+
+
+def peer_median_margin(rows: Sequence[dict[str, Any]]) -> tuple[float | None, int]:
+    """Median EBITDA margin across the peer rows that report one, and the count."""
+    margins = [float(r["ebitda_margin"]) for r in rows if r.get("ebitda_margin") is not None]
+    return (valuation.percentile(margins, 0.5) if margins else None), len(margins)
+
+
+def margin_position(target: float | None, median: float | None) -> str | None:
+    """"above", "in line with" (within ±2 points) or "below"; None if unknown."""
+    if target is None or median is None:
+        return None
+    diff = float(target) - float(median)
+    # Rounded to a hundredth of a point so a gap of exactly 2 points is in line
+    # rather than falling either side on float noise.
+    if round(abs(diff), 6) <= IN_LINE_MARGIN_POINTS:
+        return "in line with"
+    return "above" if diff > 0 else "below"
+
+
+def profitability_sentence(
+    basis_row: dict[str, Any], basis_label: str, comp_rows: Sequence[dict[str, Any]], currency: str,
+) -> str | None:
+    """Target EBITDA margin against the PEER MEDIAN, quoting both numbers."""
+    revenue = basis_row.get("revenue")
+    margin = basis_row.get("ebitda_margin")
+    median, count = peer_median_margin(comp_rows)
+    position = margin_position(margin, median)
+    if revenue is None:
+        return None
+    if position is None:
+        if margin is None:
+            return None
+        return (
+            f"{basis_label} revenue of {_fmt_money(revenue, currency)} at a {_fmt_pct(margin)} EBITDA margin; "
+            "no peer margins are loaded to compare profitability against."
+        )
+    within = " (within ±2 points)" if position == "in line with" else ""
+    multiple = (
+        f", on {_fmt_x(basis_row['ev_revenue'])} {basis_label} EV/Revenue"
+        if basis_row.get("ev_revenue") is not None else ""
+    )
+    return (
+        f"{basis_label} revenue of {_fmt_money(revenue, currency)} at a {_fmt_pct(margin)} EBITDA margin is "
+        f"{position} the peer median of {_fmt_pct(median)}{within} across {count} peers{multiple}."
+    )
+
+
+def _concluded_sources(methods: Sequence[str]) -> str:
+    has_dcf = any(m.startswith("DCF") for m in methods)
+    has_multiples = any(not m.startswith("DCF") for m in methods)
+    if has_dcf and has_multiples:
+        return "peer multiples and DCF"
+    return "DCF" if has_dcf else "peer multiples"
+
+
+def _unbridged_reason(field: dict[str, Any], metrics: dict[str, Any]) -> str:
+    if metrics.get("net_debt") is None:
+        return "net debt is not reported on the latest balance sheet loaded"
+    if not metrics.get("shares_diluted"):
+        return "no share count is loaded"
+    note = (field.get("dcf_note") or "").rstrip(".")
+    return note[:1].lower() + note[1:] if note else "no valuation method produced a per-share range"
+
+
+def concluded_sentence(field: dict[str, Any], metrics: dict[str, Any]) -> str:
+    """The implied range against the price — never a move, never "upside"."""
+    concluded = field.get("concluded_range") or {}
+    currency = metrics.get("currency") or "USD"
+    price = _fmt_price(metrics.get("share_price"), currency)
+    low, high = concluded.get("low"), concluded.get("high")
+    if low is None or high is None:
+        return (
+            f"The valuation methods could not be bridged to a per-share value ({_unbridged_reason(field, metrics)}), "
+            f"so no implied range is stated against the current {price}."
+        )
+    methods = list(concluded.get("methods") or [])
+    references = [r["method"] for r in field.get("ranges") or [] if r.get("reference")]
+    tail = f"; the {', '.join(references)} is shown for reference only" if references else ""
+    rests = (
+        f"rests on {len(methods)} method{'s' if len(methods) != 1 else ''}: {', '.join(methods)}"
+        if methods else "is the median of the valuation bars"
+    )
+    return (
+        f"The concluded range, implied value at {_concluded_sources(methods)} of {_fmt_price(low, currency)}–"
+        f"{_fmt_price(high, currency)} per share against the current {price}, {rests}{tail}."
+    )
+
+
+def _strip_promotional(text: str) -> bool:
+    lowered = text.lower()
+    return not any(word in lowered for word in PROMOTIONAL_WORDS)
+
+
+def build_stamp(conn: sqlite3.Connection, metrics: dict[str, Any]) -> dict[str, Any]:
+    """Data, price and build dates for the cover and every slide footer.
+
+    The audit found the shipped deck disagreed with the code that was meant to
+    have produced it, and nothing on the page said when either was made
+    (RAILS_PORT item 22). "Data as of" is the newest of the balance-sheet date,
+    the LTM period end and the company's latest document in the corpus.
+    """
+    bridge = metrics.get("ev_bridge") or {}
+    ltm = metrics.get("ltm") or {}
+    latest_document = scalar(
+        conn, "SELECT MAX(published_at) FROM documents WHERE company_id = ?", (metrics.get("company_id"),),
+    ) if metrics.get("company_id") is not None else None
+    candidates = [
+        str(value)[:10] for value in (
+            metrics.get("net_debt_as_of") or bridge.get("balance_sheet_date"), ltm.get("period_end"), latest_document,
+        ) if value
+    ]
+    data_as_of = max(candidates) if candidates else None
+    price_date = metrics.get("as_of") or bridge.get("price_date")
+    built = date.today().isoformat()
+    parts = []
+    if data_as_of:
+        parts.append(f"Data as of {data_as_of}")
+    if price_date:
+        parts.append(f"price as of {price_date}")
+    parts.append(f"built {built}")
+    text = ", ".join(parts)
+    text = text[:1].upper() + text[1:] + f" · Argos {__version__}"
+    return {
+        "text": text,
+        "data_as_of": data_as_of,
+        "balance_sheet_date": metrics.get("net_debt_as_of") or bridge.get("balance_sheet_date"),
+        "price_date": price_date,
+        "built": built,
+        "version": __version__,
+    }
 
 
 # ----------------------------------------------------------------- creation
@@ -196,10 +462,14 @@ def rebuild_slides(conn: sqlite3.Connection, pitchbook_id: int) -> list[dict[str
         "process": _slide_process,
         "evidence_appendix": _slide_evidence,
     }
+    # One stamp per build, on the cover and in every slide payload, so the
+    # HTML footer (and any exporter) can say how fresh each slide is; a pinned
+    # slide keeps the stamp of the build that produced it.
+    stamp = build_stamp(conn, metrics)
     context = {
         "conn": conn, "book": book, "ticker": ticker, "comps": comps,
         "field": field, "metrics": metrics, "profile": profile,
-        "pitchbook_id": pitchbook_id,
+        "pitchbook_id": pitchbook_id, "stamp": stamp,
     }
 
     conn.execute("DELETE FROM slides WHERE pitchbook_id = ? AND is_pinned = 0", (pitchbook_id,))
@@ -208,13 +478,15 @@ def rebuild_slides(conn: sqlite3.Connection, pitchbook_id: int) -> list[dict[str
             conn.execute("UPDATE slides SET seq = ? WHERE pitchbook_id = ? AND kind = ?", (seq, pitchbook_id, kind))
             continue
         built = builders[kind](context)
+        payload = dict(built.get("payload", {}))
+        payload.setdefault("stamp", stamp)
         insert(conn, "slides", {
             "pitchbook_id": pitchbook_id,
             "seq": seq,
             "kind": kind,
             "title": built.get("title") or default_title,
             "subtitle": built.get("subtitle"),
-            "payload": dump_json(built.get("payload", {})),
+            "payload": dump_json(payload),
         })
     conn.execute("UPDATE pitchbooks SET updated_at = ? WHERE id = ?", (_now(), pitchbook_id))
     conn.commit()
@@ -223,6 +495,7 @@ def rebuild_slides(conn: sqlite3.Connection, pitchbook_id: int) -> list[dict[str
 
 def _slide_cover(ctx: dict[str, Any]) -> dict[str, Any]:
     book, metrics = ctx["book"], ctx["metrics"]
+    stamp = ctx.get("stamp") or {}
     return {
         "title": book["title"],
         "subtitle": book["subtitle"],
@@ -233,6 +506,9 @@ def _slide_cover(ctx: dict[str, Any]) -> dict[str, Any]:
             "banker": book["banker"],
             "date": datetime.now(timezone.utc).strftime("%d %B %Y"),
             "confidential": True,
+            "stamp": stamp,
+            "data_as_of": stamp.get("data_as_of"),
+            "price_date": stamp.get("price_date"),
         },
     }
 
@@ -241,32 +517,74 @@ def _slide_disclaimer(ctx: dict[str, Any]) -> dict[str, Any]:
     return {"title": "Disclaimer", "payload": {"body": DISCLAIMER}}
 
 
+def _valuation_sentence(metrics: dict[str, Any]) -> str:
+    """Price, size and every multiple with the period it is quoted on."""
+    currency = metrics["currency"]
+    basis_row, label = _basis(metrics)
+    ntm = metrics.get("ntm") or {}
+    price_date = metrics.get("as_of")
+    text = (
+        f"{metrics['name']} ({metrics['ticker']}) trades at {_fmt_price(metrics['share_price'], currency)} per share"
+        + (f" (price as of {price_date})" if price_date else "")
+        + f", a market capitalisation of {_fmt_money(metrics['market_cap'], currency)}"
+    )
+    if metrics.get("enterprise_value") is None:
+        return text + "; net debt is not reported, so no enterprise value or EV multiple is quoted."
+    text += f" and an enterprise value of {_fmt_money(metrics['enterprise_value'], currency)}"
+    multiples = []
+    if basis_row.get("ev_ebitda") is not None:
+        multiples.append(f"{_fmt_x(basis_row['ev_ebitda'])} {label} EBITDA")
+    if ntm.get("ev_ebitda") is not None:
+        multiples.append(f"{_fmt_x(ntm['ev_ebitda'])} NTM EBITDA")
+    if multiples:
+        text += ", or " + " and ".join(multiples)
+    return text + "."
+
+
+def _ntm_sentence(metrics: dict[str, Any]) -> str | None:
+    """Where the NTM figures come from, so a forward multiple is never unexplained."""
+    ntm = metrics.get("ntm") or {}
+    if not ntm or ntm.get("revenue") is None:
+        return None
+    _, label = _basis(metrics)
+    years = [f"FY{y}" for y in (ntm.get("fiscal_years") or []) if y is not None]
+    weight = ntm.get("weight_current_year")
+    if weight is not None and len(years) == 2 and 0.005 < weight < 0.995:
+        blend = f"{weight * 100:.0f}% {years[0]} and {100 - weight * 100:.0f}% {years[1]}"
+    elif weight is not None and len(years) == 2:
+        blend = f"{years[0] if weight >= 0.995 else years[1]} only"
+    else:
+        blend = " / ".join(years) or "the estimate years loaded"
+    text = (
+        # "estimate rows" is the Rails source fallback (seeded or hand-entered
+        # rows); only a consensus feed is called consensus.
+        f"NTM figures calendarise the fiscal-year estimates ({blend}; source: {ntm.get('source') or 'estimate rows'}): "
+        f"NTM revenue of {_fmt_money(ntm['revenue'], metrics['currency'])}"
+    )
+    if ntm.get("pe") is not None:
+        text += f" and {_fmt_x(ntm['pe'])} NTM P/E"
+    if ntm.get("ebitda_derived"):
+        text += f"; NTM EBITDA is derived from NTM revenue at the {label} margin, as no consensus EBITDA is loaded"
+    return text + "."
+
+
 def _slide_executive_summary(ctx: dict[str, Any]) -> dict[str, Any]:
     conn, metrics, field, profile = ctx["conn"], ctx["metrics"], ctx["field"], ctx["profile"]
     currency = metrics["currency"]
-    latest = metrics["latest_actual"]
-    concluded = field["concluded_range"]
+    basis_row, label = _basis(metrics)
+    concluded = field.get("concluded_range") or {}
     price = metrics["share_price"]
+    comp_rows = (field.get("comps") or {}).get("rows") or []
+    median_margin, peer_count = peer_median_margin(comp_rows)
 
-    bullets: list[dict[str, Any]] = [
-        {"text": (
-            f"{metrics['name']} ({metrics['ticker']}) trades at {_fmt_price(price, currency)}"
-            f" per share, a market capitalisation of {_fmt_money(metrics['market_cap'], currency)} and an enterprise "
-            f"value of {_fmt_money(metrics['enterprise_value'], currency)}, or {_fmt_x(latest['ev_ebitda'])} "
-            f"FY{latest['fiscal_year']} EBITDA."
-        )},
-        {"text": (
-            f"Our analysis supports a reference range of {_fmt_price(concluded['low'], currency)}–"
-            f"{_fmt_price(concluded['high'], currency)} per share, versus the current "
-            f"{_fmt_price(price, currency)}, implying "
-            f"{_fmt_pct(concluded['high'] / price - 1 if price else None)} upside at the top of the range."
-        )},
-        {"text": (
-            f"Revenue of {_fmt_money(latest['revenue'], currency)} at a {_fmt_pct(latest['ebitda_margin'])} EBITDA "
-            f"margin places the company {'above' if (latest['ebitda_margin'] or 0) > 0.22 else 'in line with'} the "
-            f"peer set on profitability, on {_fmt_x(latest['ev_revenue'])} EV/Revenue."
-        )},
-    ]
+    bullets: list[dict[str, Any]] = [{"text": _valuation_sentence(metrics)}]
+    ntm_text = _ntm_sentence(metrics)
+    if ntm_text:
+        bullets.append({"text": ntm_text})
+    bullets.append({"text": concluded_sentence(field, metrics)})
+    profitability = profitability_sentence(basis_row, label, comp_rows, currency)
+    if profitability:
+        bullets.append({"text": profitability})
 
     # Pull the research module's own view of the name, with citations. The query
     # is OR-ed on purpose: an AND across every theme word matches nothing.
@@ -274,7 +592,10 @@ def _slide_executive_summary(ctx: dict[str, Any]) -> dict[str, Any]:
         conn, "guidance OR margin OR demand OR pricing OR retention",
         {"ticker": metrics["ticker"]}, limit=8, summarize=True,
     )
-    for bullet in (research.get("summary", {}).get("bullets") or [])[:3]:
+    # A quote that talks about "upside" sits next to the implied range and reads
+    # as the deck's own claim, so such passages are left to the research module.
+    quoted = [b for b in (research.get("summary", {}).get("bullets") or []) if _strip_promotional(b.get("text") or "")]
+    for bullet in quoted[:3]:
         bullets.append({
             "text": bullet["text"],
             "source": {
@@ -286,8 +607,7 @@ def _slide_executive_summary(ctx: dict[str, Any]) -> dict[str, Any]:
     # Themes grounded in the passages the research query actually matched; the
     # per-company trend model is too thin on a handful of filings to quote.
     themes = [
-        t["theme"] for t in (research.get("summary", {}).get("themes") or [])
-        if len(t["theme"]) >= 5
+        t["theme"] for t in filter_themes(research.get("summary", {}).get("themes") or [], company_name=metrics.get("name"))
     ][:4]
     if themes:
         bullets.append({"text": (
@@ -306,27 +626,48 @@ def _slide_executive_summary(ctx: dict[str, Any]) -> dict[str, Any]:
             f"{profile.get('sentiment_label', 'neutral')} ({sentiment:+.2f} on a −1 to +1 scale), which we read as {reading}."
         )})
 
+    bridged = concluded.get("low") is not None and concluded.get("high") is not None
     return {
         "title": "Executive summary",
-        "subtitle": f"{metrics['name']} — situation assessment",
-        "payload": {"bullets": bullets, "reference_range": concluded, "share_price": price, "currency": currency},
+        "subtitle": f"{metrics['name']} — situation assessment · multiples on {label}",
+        "payload": {
+            "bullets": bullets,
+            # Exporters print a range tile from this key; an unbridged range is
+            # passed as empty so no exporter formats None as a price.
+            "reference_range": concluded if bridged else {},
+            "concluded_range": concluded,
+            "share_price": price,
+            "currency": currency,
+            "basis_label": label,
+            "price_date": metrics.get("as_of"),
+            "peer_median_margin": None if median_margin is None else round(median_margin, 4),
+            "peer_margin_count": peer_count,
+            "target_margin": basis_row.get("ebitda_margin"),
+            "margin_position": margin_position(basis_row.get("ebitda_margin"), median_margin),
+        },
     }
 
 
 def _slide_company_overview(ctx: dict[str, Any]) -> dict[str, Any]:
     metrics, profile = ctx["metrics"], ctx["profile"]
-    latest = metrics["latest_actual"]
+    basis_row, label = _basis(metrics)
+    ntm = metrics.get("ntm") or {}
     currency = metrics["currency"]
+    not_reported = "not reported"
     kpis = [
         {"label": "Share price", "value": _fmt_price(metrics["share_price"], currency)},
         {"label": "Market capitalisation", "value": _fmt_money(metrics["market_cap"], currency)},
-        {"label": "Enterprise value", "value": _fmt_money(metrics["enterprise_value"], currency)},
-        {"label": "Net debt", "value": _fmt_money(metrics["net_debt"], currency)},
-        {"label": f"FY{latest['fiscal_year']} revenue", "value": _fmt_money(latest["revenue"], currency)},
-        {"label": f"FY{latest['fiscal_year']} EBITDA", "value": f"{_fmt_money(latest['ebitda'], currency)} ({_fmt_pct(latest['ebitda_margin'])})"},
-        {"label": "EV / EBITDA", "value": _fmt_x(latest["ev_ebitda"])},
-        {"label": "Employees", "value": f"{metrics['employees']:,}" if metrics["employees"] else "n/a"},
+        {"label": "Enterprise value", "value": _fmt_money(metrics["enterprise_value"], currency)
+         if metrics.get("enterprise_value") is not None else not_reported},
+        {"label": "Net debt" + (f" ({metrics['net_debt_as_of']})" if metrics.get("net_debt_as_of") else ""),
+         "value": _fmt_money(metrics["net_debt"], currency) if metrics.get("net_debt") is not None else not_reported},
+        {"label": f"{label} revenue", "value": _fmt_money(basis_row.get("revenue"), currency)},
+        {"label": f"{label} EBITDA", "value": f"{_fmt_money(basis_row.get('ebitda'), currency)} ({_fmt_pct(basis_row.get('ebitda_margin'))})"},
+        {"label": f"EV / {label} EBITDA", "value": _fmt_x(basis_row.get("ev_ebitda"))},
+        {"label": "Employees", "value": f"{metrics['employees']:,}" if metrics["employees"] else not_reported},
     ]
+    if ntm.get("ev_ebitda") is not None:
+        kpis.append({"label": "EV / NTM EBITDA", "value": _fmt_x(ntm["ev_ebitda"])})
     extracted = [
         {"label": k["label"], "value": f"{k['latest']:.1f}{'%' if k['unit'] == '%' else ''}",
          "observations": k["observations"], "unit": k["unit"]}
@@ -334,37 +675,91 @@ def _slide_company_overview(ctx: dict[str, Any]) -> dict[str, Any]:
     ]
     return {
         "title": f"{metrics['name']} — company overview",
-        "subtitle": f"{metrics['industry']} · {metrics['hq']}",
+        "subtitle": " · ".join(part for part in (metrics.get("industry"), metrics.get("hq")) if part),
         "payload": {
             "description": metrics["description"],
             "kpis": kpis,
             "extracted_kpis": extracted,
             "sector": metrics["sector"],
             "country": metrics["country"],
+            "basis_label": label,
         },
     }
 
 
+def _theme_shares(theme: dict[str, Any], recent_docs: int, baseline_docs: int) -> dict[str, Any]:
+    share = int(theme.get("mentions") or 0) / recent_docs if recent_docs else None
+    prior = int(theme.get("prior_mentions") or 0) / baseline_docs if baseline_docs else None
+    return {
+        **theme,
+        "share": None if share is None else round(share, 4),
+        "prior_share": None if prior is None else round(prior, 4),
+        "share_change": None if share is None or prior is None else round(share - prior, 4),
+    }
+
+
+def theme_shift_sentence(themes: Sequence[dict[str, Any]], baseline_docs: int, baseline_days: int) -> str:
+    """Say the discussion "shifted toward X from Y" only when the shares show it.
+
+    X must have gained and Y lost at least ``THEME_SHIFT_POINTS`` of documents;
+    the reference deck asserted "a shift of emphasis rather than of subject
+    matter" whatever the numbers were.
+    """
+    changes = [t for t in themes if t.get("share_change") is not None]
+    if not baseline_docs or not changes:
+        return "There is no prior-period corpus to compare against, so no shift in the topic mix is measured."
+    gainer = max(changes, key=lambda t: t["share_change"])
+    loser = min(changes, key=lambda t: t["share_change"])
+    lead = f"Against {baseline_docs} documents in the preceding {baseline_days} days"
+    gained = gainer["share_change"] >= THEME_SHIFT_POINTS
+    lost = loser["share_change"] <= -THEME_SHIFT_POINTS
+
+    def move(theme: dict[str, Any]) -> str:
+        return f"{_fmt_pct(theme['prior_share'], 0)} to {_fmt_pct(theme['share'], 0)} of documents"
+
+    if gained and lost:
+        return (
+            f"{lead}, discussion has shifted toward {gainer['theme']} ({move(gainer)}) from "
+            f"{loser['theme']} ({move(loser)})."
+        )
+    if gained:
+        return (
+            f"{lead}, {gainer['theme']} gained share ({move(gainer)}) without any tracked theme losing "
+            f"{THEME_SHIFT_POINTS * 100:.0f} points, so the topic mix is otherwise stable."
+        )
+    return (
+        f"{lead}, the topic mix is stable: no tracked theme moved by {THEME_SHIFT_POINTS * 100:.0f} points "
+        "or more of documents."
+    )
+
+
 def _slide_market_overview(ctx: dict[str, Any]) -> dict[str, Any]:
     conn, metrics = ctx["conn"], ctx["metrics"]
-    trending = analytics.trending_themes(conn, window_days=180, limit=8)
+    # A wide pull so the boilerplate filter still leaves eight themes and the
+    # shift comparison sees falling themes as well as the rising ones.
+    trending = analytics.trending_themes(conn, window_days=180, limit=40)
     timeline = analytics.sentiment_timeline(conn, months=24)
     volume = analytics.volume_by_type(conn, months=24)
-    top = [t["theme"] for t in trending["themes"][:3]]
+    recent_docs = int(trending.get("recent_documents") or 0)
+    baseline_docs = int(trending.get("baseline_documents") or 0)
+    window = int(trending.get("window_days") or 180)
+    themes = [_theme_shares(t, recent_docs, baseline_docs) for t in filter_themes(trending.get("themes") or [])]
+    top = [t["theme"] for t in themes[:3]]
     narrative = (
-        f"Across {trending['recent_documents']} documents published in the last {trending['window_days']} days, "
-        f"sector discussion has concentrated on {', '.join(top) if top else 'no single dominant theme'}. "
-        f"The same themes appeared in {trending['baseline_documents']} documents over the preceding comparable "
-        f"period, so the shift is one of emphasis rather than of subject matter."
+        f"Across {recent_docs} documents published in the last {window} days, sector discussion has concentrated on "
+        f"{', '.join(top) if top else 'no theme that passes the boilerplate filter'}. "
+        + theme_shift_sentence(themes, baseline_docs, window * 2)
     )
     return {
         "title": f"{metrics['sector']} — market overview",
         "subtitle": "What the corpus says is changing",
         "payload": {
             "narrative": narrative,
-            "themes": trending["themes"],
+            "themes": themes[:8],
             "sentiment_timeline": timeline,
             "volume_by_type": volume,
+            "recent_documents": recent_docs,
+            "baseline_documents": baseline_docs,
         },
     }
 
@@ -372,7 +767,11 @@ def _slide_market_overview(ctx: dict[str, Any]) -> dict[str, Any]:
 def _slide_financials(ctx: dict[str, Any]) -> dict[str, Any]:
     metrics = ctx["metrics"]
     rows = []
-    for row in metrics["financials"]:
+    # Fiscal years only: an LTM row shares its fiscal_year with the year it
+    # rolls forward and would plot as a duplicate "FY" column. It travels
+    # separately under "ltm".
+    fiscal = [r for r in metrics["financials"] if (r.get("period_type") or "FY") != "LTM"]
+    for row in fiscal:
         revenue = float(row["revenue"] or 0)
         rows.append({
             "fiscal_year": row["fiscal_year"],
@@ -394,6 +793,12 @@ def _slide_financials(ctx: dict[str, Any]) -> dict[str, Any]:
         periods = rows[-1]["fiscal_year"] - rows[0]["fiscal_year"]
         if periods:
             cagr = round((rows[-1]["revenue"] / rows[0]["revenue"]) ** (1 / periods) - 1, 4)
+    note = ""
+    if cagr is not None and rows and rows[0]["ebitda_margin"] is not None and rows[-1]["ebitda_margin"] is not None:
+        note = (
+            f"Revenue compounds at {_fmt_pct(cagr)} across the period with EBITDA margin moving from "
+            f"{_fmt_pct(rows[0]['ebitda_margin'])} to {_fmt_pct(rows[-1]['ebitda_margin'])}."
+        )
     return {
         "title": f"{metrics['name']} — financial performance",
         "subtitle": f"{metrics['currency']}m, fiscal years; forward years are estimates",
@@ -402,67 +807,172 @@ def _slide_financials(ctx: dict[str, Any]) -> dict[str, Any]:
             "growths": growths,
             "revenue_cagr": cagr,
             "currency": metrics["currency"],
-            "note": (
-                f"Revenue compounds at {_fmt_pct(cagr)} across the period with EBITDA margin moving from "
-                f"{_fmt_pct(rows[0]['ebitda_margin'])} to {_fmt_pct(rows[-1]['ebitda_margin'])}."
-                if cagr is not None and rows else ""
-            ),
+            "note": note,
+            "ltm": metrics.get("ltm"),
         },
     }
 
 
 def _slide_valuation_summary(ctx: dict[str, Any]) -> dict[str, Any]:
     field, metrics = ctx["field"], ctx["metrics"]
+    _, label = _basis(metrics)
+    ranges = []
+    for r in field.get("ranges") or []:
+        row = dict(r)
+        row.setdefault("in_conclusion", True)
+        row.setdefault("reference", False)
+        row.setdefault("note", None)
+        ranges.append(row)
+    concluded = field.get("concluded_range") or {}
+    methods = list(concluded.get("methods") or [r["method"] for r in ranges if r["in_conclusion"]])
+    excluded = [
+        {"method": r["method"], "reference": bool(r["reference"]),
+         "note": r["note"] or ("Reference only, not a valuation method." if r["reference"] else "Excluded from the conclusion.")}
+        for r in ranges if not r["in_conclusion"]
+    ]
+    if concluded.get("low") is not None and concluded.get("high") is not None:
+        conclusion_note = (
+            f"The concluded range ({_fmt_price(concluded['low'], metrics['currency'])}–"
+            f"{_fmt_price(concluded['high'], metrics['currency'])}) is the median low to median high of: "
+            + ", ".join(methods) + "."
+        )
+    else:
+        conclusion_note = (
+            f"No concluded range: the valuation methods could not be bridged to a per-share value "
+            f"({_unbridged_reason(field, metrics)})."
+        )
+    price_date = metrics.get("as_of")
     return {
         "title": "Valuation summary",
-        "subtitle": f"Implied value per share, {metrics['currency']}",
+        "subtitle": (
+            f"Implied value per share, {metrics['currency']} · multiples on {label}"
+            + (f" · price as of {price_date}" if price_date else "")
+        ),
         "payload": {
-            "ranges": field["ranges"],
-            "reference_price": field["reference_price"],
-            "concluded_range": field["concluded_range"],
-            "axis": field["axis"],
+            "ranges": ranges,
+            "reference_price": field.get("reference_price"),
+            "concluded_range": concluded,
+            "axis": field.get("axis"),
             "currency": metrics["currency"],
+            "basis_label": label,
+            "price_date": price_date,
+            "concluded_methods": methods,
+            "excluded": excluded,
+            "conclusion_note": conclusion_note,
+            "dcf_note": field.get("dcf_note"),
         },
     }
+
+
+def _share_basis(row: dict[str, Any]) -> str:
+    """Which share count the market cap rests on (RAILS_PORT items 15 and 17)."""
+    diluted, basic = row.get("shares_diluted"), row.get("shares_basic")
+    if not diluted:
+        return "no share count"
+    if basic is None:
+        return "diluted (as loaded)"
+    if abs(float(diluted) - float(basic)) < 0.005:
+        return "basic (cover page)"
+    return "weighted diluted"
 
 
 def _slide_trading_comps(ctx: dict[str, Any]) -> dict[str, Any]:
     field, metrics = ctx["field"], ctx["metrics"]
-    comps = field["comps"]
+    comps = field.get("comps") or {"rows": [], "stats": {}, "labels": {}}
+    basis_row, label = _basis(metrics)
+    ntm = metrics.get("ntm") or {}
+
+    def rounded(value: Any) -> float | None:
+        return None if value is None else round(float(value), 1)
+
     target_row = {
         "ticker": metrics["ticker"], "name": metrics["name"], "is_target": True,
         "share_price": metrics["share_price"], "market_cap": metrics["market_cap"],
         "enterprise_value": metrics["enterprise_value"], "net_debt": metrics["net_debt"],
-        "revenue": round(metrics["latest_actual"]["revenue"], 1),
-        "ebitda": round(metrics["latest_actual"]["ebitda"], 1),
-        "ebitda_margin": metrics["latest_actual"]["ebitda_margin"],
-        "ev_revenue": metrics["latest_actual"]["ev_revenue"],
-        "ev_ebitda": metrics["latest_actual"]["ev_ebitda"],
-        "pe": metrics["latest_actual"]["pe"],
-        "fiscal_year": metrics["latest_actual"]["fiscal_year"],
+        "revenue": rounded(basis_row.get("revenue")),
+        "ebitda": rounded(basis_row.get("ebitda")),
+        "ebitda_margin": basis_row.get("ebitda_margin"),
+        "ev_revenue": basis_row.get("ev_revenue"),
+        "ev_ebitda": basis_row.get("ev_ebitda"),
+        "pe": basis_row.get("pe"),
+        "fiscal_year": basis_row.get("fiscal_year"),
+        "basis": label,
+        "ev_ebitda_ntm": ntm.get("ev_ebitda"),
+        "ev_revenue_ntm": ntm.get("ev_revenue"),
+        "pe_ntm": ntm.get("pe"),
+        "price_date": metrics.get("as_of"),
+        "net_debt_as_of": metrics.get("net_debt_as_of"),
+        "balance_sheet_date": metrics.get("net_debt_as_of"),
+        "shares_diluted": metrics.get("shares_diluted"),
+        "shares_basic": metrics.get("shares_basic"),
+        "share_basis": _share_basis(metrics),
     }
+    rows = []
+    for r in comps.get("rows") or []:
+        row = dict(r)
+        row.setdefault("basis", label)
+        row["balance_sheet_date"] = row.get("net_debt_as_of")
+        row["share_basis"] = _share_basis(row)
+        rows.append(row)
+    price_dates = sorted({str(r["price_date"]) for r in [target_row, *rows] if r.get("price_date")})
+    bases = sorted({str(r["basis"]) for r in [target_row, *rows] if r.get("basis")})
+    has_ntm = any(r.get("ev_ebitda_ntm") is not None for r in [target_row, *rows])
+    footnotes = [
+        EBITDA_DEFINITION,
+        "Multiples are on each company's own basis (column \"Basis\"): LTM where a 10-Q allowed one, else the "
+        "last fiscal year" + (f"; bases in this set: {', '.join(bases)}." if bases else "."),
+        "Market capitalisation uses the share count shown under \"Shares\": a weighted diluted count where the "
+        "loader validated one, else the cover-page (basic) count.",
+        "Enterprise value adds net debt from the balance sheet dated in \"B/S date\" plus minority interest and "
+        "preferred equity; a blank date means the loader stored no balance-sheet date.",
+    ]
+    if has_ntm:
+        footnotes.append(
+            "NTM EV/EBITDA calendarises the fiscal year in progress and the next to the price date; where no "
+            "EBITDA estimate is loaded, "
+            "NTM EBITDA is derived from NTM revenue at the current margin."
+        )
     return {
         "title": "Trading comparables",
-        "subtitle": f"{metrics['sector']} · {metrics['currency']}m except per-share and multiples",
+        "subtitle": (
+            f"{metrics['sector']} · {metrics['currency']}m except per-share and multiples · multiples on {label}"
+            + (f" · prices as of {', '.join(price_dates)}" if price_dates else "")
+        ),
         "payload": {
             "target": target_row,
-            "rows": comps["rows"],
-            "stats": comps["stats"],
-            "labels": comps["labels"],
+            "rows": rows,
+            "stats": comps.get("stats") or {},
+            "labels": comps.get("labels") or {},
             "currency": metrics["currency"],
+            "basis_label": label,
+            "price_dates": price_dates,
+            "balance_sheet_date": metrics.get("net_debt_as_of"),
+            "has_ntm": has_ntm,
+            "ebitda_definition": EBITDA_DEFINITION,
+            "footnotes": footnotes,
         },
     }
 
 
+def _precedent_premium_sentence(premium: dict[str, Any]) -> str | None:
+    if premium.get("median") is None:
+        return None
+    return f"a median one-day premium of {_fmt_pct(premium['median'])}"
+
+
 def _slide_precedents(ctx: dict[str, Any]) -> dict[str, Any]:
     field = ctx["field"]
-    precedents = field["precedents"]
-    stats = precedents["stats"]
-    if precedents["rows"]:
-        note = (
-            f"Median EV/EBITDA of {_fmt_x(stats['ev_ebitda']['median'])} on a median one-day premium of "
-            f"{_fmt_pct(stats['premium_1day']['median'])} across {stats['ev_ebitda']['count']} transactions."
-        )
+    precedents = field.get("precedents") or {"rows": [], "stats": {}}
+    stats = precedents.get("stats") or {}
+    ebitda_stats = stats.get("ev_ebitda") or {}
+    premium = _precedent_premium_sentence(stats.get("premium_1day") or {})
+    if precedents.get("rows"):
+        if ebitda_stats.get("median") is not None:
+            note = f"Median EV/EBITDA of {_fmt_x(ebitda_stats['median'])} across {ebitda_stats.get('count', 0)} transactions"
+            note += f", on {premium}." if premium else "; one-day premia are not loaded for these deals."
+        else:
+            note = f"{len(precedents['rows'])} transactions are loaded but none discloses EV/EBITDA"
+            note += f"; they cleared at {premium}." if premium else "."
     else:
         note = (
             "No precedent transactions are loaded for this sector. Deal multiples are not available from "
@@ -473,99 +983,233 @@ def _slide_precedents(ctx: dict[str, Any]) -> dict[str, Any]:
     return {
         "title": "Precedent transactions",
         "subtitle": "Announced transactions in the sector",
-        "payload": {"rows": precedents["rows"], "stats": stats, "note": note},
+        "payload": {"rows": precedents.get("rows") or [], "stats": stats, "note": note},
     }
 
 
 def _slide_dcf(ctx: dict[str, Any]) -> dict[str, Any]:
     field, metrics = ctx["field"], ctx["metrics"]
-    dcf = field["dcf"]
-    a = dcf["assumptions"]
+    currency = metrics["currency"]
+    _, label = _basis(metrics)
+    dcf = field.get("dcf") or {}
+    a = dcf.get("assumptions") or {}
+    build = dict(field.get("wacc") or {})
+    projections = dcf.get("projections") or []
+    terminal = dcf.get("terminal_year")
+    stub = dcf.get("stub_fraction", a.get("stub_fraction"))
+    valuation_date = dcf.get("valuation_date", a.get("valuation_date"))
+
+    # One table that ties: EBIT − taxes + D&A − capex − ΔNWC = full-year UFCF,
+    # of which year 1 counts its stub fraction; the terminal year closes it.
+    projection_rows = [{**p, "label": str(p.get("year")), "is_terminal": False} for p in projections]
+    if terminal:
+        projection_rows.append({
+            **terminal,
+            "label": f"Terminal ({terminal.get('year')})",
+            "is_terminal": True,
+            "fcf_full_year": terminal.get("fcf"),
+            "period_fraction": None,
+            "discount_period": dcf.get("terminal_discount_period"),
+            "discount_factor": None,
+            "pv_fcf": None,
+        })
+
+    wacc_notes = list(build.get("notes") or [])
+    if build.get("wacc") is not None and a.get("wacc") is not None and abs(float(a["wacc"]) - float(build["wacc"])) > 1e-6:
+        wacc_notes.append(
+            f"WACC of {float(a['wacc']) * 100:.2f}% set in the deck assumptions overrides the built-up "
+            f"{float(build['wacc']) * 100:.2f}%."
+        )
+
+    sentences = []
+    if dcf.get("value_per_share") is not None:
+        sentences.append(
+            f"Base case equity value of {_fmt_money(dcf.get('equity_value'), currency)} equates to "
+            f"{_fmt_price(dcf['value_per_share'], currency)} per share against the current "
+            f"{_fmt_price(metrics['share_price'], currency)}."
+        )
+    elif dcf.get("enterprise_value") is not None:
+        reason = dcf.get("bridge_note") or field.get("dcf_note") or "No share count is loaded, so no per-share value is shown."
+        sentences.append(f"Enterprise value of {_fmt_money(dcf['enterprise_value'], currency)}. {reason}")
+    if dcf.get("terminal_share_of_ev") is not None:
+        sentences.append(
+            f"The terminal value ({dcf.get('terminal_method', 'terminal value')}) accounts for "
+            f"{_fmt_pct(dcf['terminal_share_of_ev'])} of enterprise value."
+        )
+    checks = []
+    if dcf.get("implied_exit_multiple") is not None:
+        checks.append(f"{_fmt_x(dcf['implied_exit_multiple'])} final-year EBITDA")
+    if dcf.get("implied_terminal_growth") is not None:
+        checks.append(f"{_fmt_pct(dcf['implied_terminal_growth'], 2)} perpetual growth")
+    if checks:
+        sentences.append("Cross-check: the terminal value implies " + " and ".join(checks) + ".")
+    if stub is not None and valuation_date and projections:
+        sentences.append(
+            f"Cash flows are discounted from the valuation date {valuation_date}; {projections[0].get('year')} counts "
+            f"{float(stub) * 100:.0f}% of its cash flow (stub period)."
+        )
+    if terminal and terminal.get("capex_floored_at_da"):
+        sentences.append("Terminal-year capex is floored at D&A.")
+
     return {
         "title": "Discounted cash flow analysis",
         "subtitle": (
-            f"WACC {a['wacc'] * 100:.2f}% · {dcf['terminal_method']} · "
-            f"{'mid-year' if a['mid_year_convention'] else 'year-end'} discounting"
+            f"WACC {float(a.get('wacc') or 0) * 100:.2f}% · {dcf.get('terminal_method', '')} · "
+            f"{'mid-year' if a.get('mid_year_convention', True) else 'year-end'} discounting"
+            + (f" · valuation date {valuation_date}" if valuation_date else "")
         ),
         "payload": {
-            "projections": dcf["projections"],
+            "projections": projections,
+            "projection_rows": projection_rows,
+            "terminal_year": terminal,
             "assumptions": a,
-            "pv_explicit": dcf["pv_explicit"],
-            "pv_terminal": dcf["pv_terminal"],
-            "terminal_share_of_ev": dcf["terminal_share_of_ev"],
-            "enterprise_value": dcf["enterprise_value"],
-            "equity_value": dcf["equity_value"],
-            "value_per_share": dcf["value_per_share"],
+            "pv_explicit": dcf.get("pv_explicit"),
+            "pv_terminal": dcf.get("pv_terminal"),
+            "terminal_value": dcf.get("terminal_value"),
+            "terminal_method": dcf.get("terminal_method"),
+            "terminal_share_of_ev": dcf.get("terminal_share_of_ev"),
+            "implied_exit_multiple": dcf.get("implied_exit_multiple"),
+            "implied_terminal_growth": dcf.get("implied_terminal_growth"),
+            "enterprise_value": dcf.get("enterprise_value"),
+            "net_debt": dcf.get("net_debt"),
+            "other_claims": dcf.get("other_claims"),
+            "equity_value": dcf.get("equity_value"),
+            "value_per_share": dcf.get("value_per_share"),
             "share_price": metrics["share_price"],
-            "currency": metrics["currency"],
-            "note": (
-                f"Base case equity value of {_fmt_money(dcf['equity_value'], metrics['currency'])} equates to "
-                f"{dcf['value_per_share']:.2f} per share; the terminal value accounts for "
-                f"{_fmt_pct(dcf['terminal_share_of_ev'])} of enterprise value."
-            ),
+            "currency": currency,
+            "basis_label": label,
+            "stub_fraction": stub,
+            "valuation_date": valuation_date,
+            "bridge_note": dcf.get("bridge_note"),
+            "dcf_note": field.get("dcf_note"),
+            "wacc_build": build,
+            "wacc_notes": wacc_notes,
+            "note": " ".join(sentences),
         },
     }
 
 
 def _slide_sensitivity(ctx: dict[str, Any]) -> dict[str, Any]:
     field = ctx["field"]
-    sens = field["sensitivity"]
+    sens = field.get("sensitivity") or {}
     return {
         "title": "DCF sensitivity",
         "subtitle": "Implied value per share across WACC and terminal growth",
         "payload": {
-            "wacc_axis": sens["wacc_axis"],
-            "terminal_axis": sens["terminal_axis"],
-            "grid": sens["grid"],
-            "min": sens["min"],
-            "max": sens["max"],
-            "reference_price": field["reference_price"],
-            "currency": field["target"]["currency"],
+            "wacc_axis": sens.get("wacc_axis") or [],
+            "terminal_axis": sens.get("terminal_axis") or [],
+            "grid": sens.get("grid") or [],
+            "min": sens.get("min"),
+            "max": sens.get("max"),
+            "reference_price": field.get("reference_price"),
+            "currency": (field.get("target") or {}).get("currency") or ctx["metrics"]["currency"],
+            "note": field.get("dcf_note") if sens.get("min") is None else None,
         },
+    }
+
+
+def counterparty_rationale(
+    row: dict[str, Any], *, target_ev: float | None, target_margin: float | None,
+    target_multiple: float | None, basis_label: str,
+) -> dict[str, Any]:
+    """Why a peer might (or might not) transact, from its own numbers.
+
+    Balance-sheet capacity needs both scale (EV at least 2x the target's) and
+    room to borrow (net debt / EBITDA below 3x); a peer with no balance sheet
+    loaded is "not assessed" rather than assumed able to pay.
+    """
+    leverage = leverage_profile(row.get("net_debt"), row.get("ebitda"))
+    exact_leverage = (
+        float(row["net_debt"]) / float(row["ebitda"]) if leverage["ratio"] is not None and leverage["band"] != "net cash" else None
+    )
+    peer_ev = row.get("enterprise_value")
+    relative = round(float(peer_ev) / float(target_ev), 2) if peer_ev is not None and target_ev else None
+    parts: list[str] = []
+    capacity: bool | None = None
+    if relative is None:
+        missing = "target" if not target_ev else "peer"
+        parts.append(f"relative size not assessed ({missing} net debt unknown)")
+    else:
+        size = f"EV {relative:.2f}x the target's"
+        if leverage["band"] == "unknown":
+            parts.append(f"{size}; balance-sheet capacity not assessed (net debt unknown)")
+        elif relative >= CAPACITY_SIZE_MULTIPLE and leverage["band"] in ("net cash", "below 1x", "1–3x") and (
+            leverage["ratio"] is None or leverage["ratio"] < CAPACITY_MAX_LEVERAGE
+        ):
+            capacity = True
+            lev = "net cash" if leverage["band"] == "net cash" else f"{exact_leverage:.1f}x net debt / EBITDA"
+            parts.append(f"{size} at {lev}: balance-sheet capacity to absorb the target")
+        elif relative >= CAPACITY_SIZE_MULTIPLE:
+            capacity = False
+            lev = f"{exact_leverage:.1f}x" if exact_leverage is not None else "non-positive EBITDA"
+            parts.append(f"{size} but net debt / EBITDA of {lev} limits debt funding")
+        elif relative >= 0.5:
+            capacity = False
+            parts.append(f"{size}: a merger-of-equals structure would be required")
+        else:
+            capacity = False
+            parts.append(f"{size}: would need significant equity or a consortium")
+
+    margin = row.get("ebitda_margin")
+    if margin is not None and target_margin is not None:
+        diff = float(margin) - float(target_margin)
+        word = "similar" if round(abs(diff), 6) <= IN_LINE_MARGIN_POINTS else ("higher" if diff > 0 else "lower")
+        parts.append(f"EBITDA margin {_fmt_pct(margin)} vs the target's {_fmt_pct(target_margin)} ({word})")
+    multiple = row.get("ev_ebitda")
+    if multiple is not None and target_multiple is not None:
+        diff = float(multiple) - float(target_multiple)
+        if abs(diff) <= SIMILAR_MULTIPLE_TURNS:
+            reading = "similar, so stock and cash cost much the same"
+        elif diff > 0:
+            reading = "higher, so its stock is a stronger acquisition currency"
+        else:
+            reading = "lower, so paying in stock would cost its holders more"
+        parts.append(
+            f"EV/EBITDA {_fmt_x(multiple)} ({row.get('basis') or basis_label}) vs the target's "
+            f"{_fmt_x(target_multiple)} ({basis_label}): {reading}"
+        )
+    return {
+        "relative_size": relative,
+        "leverage": leverage["ratio"],
+        "leverage_band": leverage["band"],
+        "capacity": capacity,
+        "rationale": "; ".join(parts),
     }
 
 
 def _slide_buyers(ctx: dict[str, Any]) -> dict[str, Any]:
     conn, field, metrics = ctx["conn"], ctx["field"], ctx["metrics"]
-    target_ev = metrics["enterprise_value"]
+    basis_row, label = _basis(metrics)
+    target_ev = metrics.get("enterprise_value")
     candidates: list[dict[str, Any]] = []
-    for row in field["comps"]["rows"]:
-        capacity = (row["enterprise_value"] or 0) / target_ev if target_ev else 0
+    for row in (field.get("comps") or {}).get("rows") or []:
         sentiment = analytics.company_profile(conn, row["ticker"]) or {}
-        rationale = []
-        if capacity >= 1.0:
-            rationale.append("balance-sheet capacity to absorb the target")
-        elif capacity >= 0.5:
-            rationale.append("merger-of-equals structure would be required")
-        else:
-            rationale.append("would need significant equity or a consortium")
-        if (row["ebitda_margin"] or 0) > (metrics["latest_actual"]["ebitda_margin"] or 0):
-            rationale.append("accretive margin profile supports a cash offer")
-        if (row["ev_ebitda"] or 0) > (metrics["latest_actual"]["ev_ebitda"] or 0):
-            rationale.append("trades at a premium multiple, so stock is attractive currency")
+        assessed = counterparty_rationale(
+            row, target_ev=target_ev, target_margin=basis_row.get("ebitda_margin"),
+            target_multiple=basis_row.get("ev_ebitda"), basis_label=label,
+        )
         candidates.append({
             "name": row["name"],
             "ticker": row["ticker"],
             "type": "Strategic",
-            "enterprise_value": row["enterprise_value"],
-            "relative_size": round(capacity, 2),
+            "enterprise_value": row.get("enterprise_value"),
             "sentiment": sentiment.get("sentiment"),
-            "rationale": "; ".join(rationale),
+            "ebitda_margin": row.get("ebitda_margin"),
+            "ev_ebitda": row.get("ev_ebitda"),
+            **assessed,
         })
     candidates.sort(key=lambda c: -(c["enterprise_value"] or 0))
 
-    premium = field["precedents"]["stats"]["premium_1day"]
-    if premium.get("median") is not None:
-        sponsor_note = (
-            f"Recurring revenue supports leverage; precedent deals in the sector cleared at a median "
-            f"{_fmt_pct(premium['median'])} premium"
-        )
-    else:
-        sponsor_note = (
-            f"Net debt of {_fmt_money(metrics['net_debt'], metrics['currency'])} against EBITDA of "
-            f"{_fmt_money(metrics['latest_actual']['ebitda'], metrics['currency'])} leaves room for a leveraged structure; "
-            "no precedent premium data loaded"
-        )
+    premium = ((field.get("precedents") or {}).get("stats") or {}).get("premium_1day") or {}
+    leverage = leverage_profile(metrics.get("net_debt"), basis_row.get("ebitda"))
+    sponsor_note = leverage_sentence(
+        metrics.get("net_debt"), basis_row.get("ebitda"), label, metrics["currency"], as_of=metrics.get("net_debt_as_of"),
+    ).rstrip(".")
+    premium_text = _precedent_premium_sentence(premium)
+    sponsor_note += (
+        f"; precedent deals in the sector cleared at {premium_text}" if premium_text
+        else "; no precedent premium data loaded"
+    )
     sponsors = [{
         "name": "Financial sponsors",
         "ticker": "—",
@@ -573,46 +1217,66 @@ def _slide_buyers(ctx: dict[str, Any]) -> dict[str, Any]:
         "enterprise_value": None,
         "relative_size": None,
         "sentiment": None,
+        "leverage": leverage["ratio"],
+        "leverage_band": leverage["band"],
+        "capacity": None,
         "rationale": sponsor_note,
     }]
     return {
         "title": "Potential counterparties",
-        "subtitle": "Indicative, based on scale, multiple and disclosure tone",
-        "payload": {"candidates": candidates[:6] + sponsors, "target_enterprise_value": target_ev},
+        "subtitle": f"Indicative, from each peer's scale, leverage, margin and multiple ({label})",
+        "payload": {"candidates": candidates[:6] + sponsors, "target_enterprise_value": target_ev, "basis_label": label},
     }
 
 
 def _slide_process(ctx: dict[str, Any]) -> dict[str, Any]:
-    field, metrics = ctx["field"], ctx["metrics"]
-    concluded = field["concluded_range"]
-    premium = field["precedents"]["stats"]["premium_1day"]
+    field, metrics, profile = ctx["field"], ctx["metrics"], ctx["profile"]
+    basis_row, label = _basis(metrics)
+    stats = (field.get("precedents") or {}).get("stats") or {}
+    premium = stats.get("premium_1day") or {}
     price = metrics["share_price"]
     currency = metrics["currency"]
-    bullets = [
-        f"Reference range of {_fmt_price(concluded['low'], currency)}–{_fmt_price(concluded['high'], currency)} per "
-        f"share implies a {(concluded['low'] / price - 1) * 100:+.0f}% to "
-        f"{(concluded['high'] / price - 1) * 100:+.0f}% move versus the current {_fmt_price(price, currency)}.",
-    ]
-    if premium.get("median") is not None:
-        bullets.append(
+    bullets = [concluded_sentence(field, metrics)]
+    if premium.get("median") is not None and price:
+        clustered = (
             f"Precedent one-day premia have clustered between {_fmt_pct(premium['p25'])} and {_fmt_pct(premium['p75'])}; "
-            f"applying the median {_fmt_pct(premium['median'])} to the current price implies "
+            if premium.get("p25") is not None and premium.get("p75") is not None else ""
+        )
+        bullets.append(
+            f"{clustered}applying the median {_fmt_pct(premium['median'])} to the current price gives "
             f"{_fmt_price(price * (1 + premium['median']), currency)} per share."
         )
+        bullets[-1] = bullets[-1][:1].upper() + bullets[-1][1:]
+    elif (field.get("precedents") or {}).get("rows"):
+        bullets.append("The loaded precedent transactions carry no one-day premium, so the control premium is unquantified here.")
     else:
         bullets.append(
             "No precedent transactions are loaded, so the control premium is unquantified here; load a deal screen "
             "(`argos load-transactions`) before the valuation discussion."
         )
-    bullets += [
-        f"Net debt of {_fmt_money(metrics['net_debt'], metrics['currency'])} is modest relative to EBITDA of "
-        f"{_fmt_money(metrics['latest_actual']['ebitda'], metrics['currency'])}, leaving room for a leveraged structure.",
-        "Diligence focus: durability of subscription pricing in competitive renewals, services mix in reported margin, "
-        "and the conversion path from pipeline to multi-year platform contracts.",
+    bullets.append(leverage_sentence(
+        metrics.get("net_debt"), basis_row.get("ebitda"), label, currency, as_of=metrics.get("net_debt_as_of"),
+    ))
+    bullets.append(
+        "Diligence focus: quality of earnings against the unadjusted GAAP EBITDA used here, revenue mix and "
+        "customer concentration, working-capital intensity, and the bridge from the latest balance sheet to "
+        "net debt at closing."
+    )
+    themes = [t["theme"] for t in filter_themes(profile.get("themes") or [], company_name=metrics.get("name"))][:3]
+    if themes:
+        bullets.append("Company-specific diligence themes from its own disclosure: " + ", ".join(themes) + ".")
+    bullets.append(
         "Suggested next steps: agree the comp set and base-case assumptions, confirm the counterparty list, "
-        "and prepare a management presentation around the themes identified in the market overview.",
-    ]
-    return {"title": "Process considerations and next steps", "payload": {"bullets": bullets}}
+        "and prepare a management presentation around the themes identified in the market overview."
+    )
+    return {
+        "title": "Process considerations and next steps",
+        "payload": {
+            "bullets": bullets,
+            "leverage": leverage_profile(metrics.get("net_debt"), basis_row.get("ebitda")),
+            "diligence_themes": themes,
+        },
+    }
 
 
 def _slide_evidence(ctx: dict[str, Any]) -> dict[str, Any]:

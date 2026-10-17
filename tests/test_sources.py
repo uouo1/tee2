@@ -474,6 +474,45 @@ class LtmTests(unittest.TestCase):
         self.assertEqual((pinned["quarter"], pinned["prior_value"]), (1, 280.0))
         self.assertIsNone(sec.latest_ytd(facts, ("Revenues",), after=date(2026, 9, 30)))
 
+    def test_sub_line_revenue_tag_yields_to_the_total_in_fy_and_ltm(self):
+        # Charter (ported from Rails bcf843e): 889m of one revenue stream under
+        # the preferred contract-revenue tag, the 55bn total under Revenues.
+        # Before the fix the FY row read 889 and the LTM rolled the Revenues
+        # YTD onto it: 889 + (27123 - 27501) = 511.
+        facts = facts_fixture()
+        gaap = facts["facts"]["us-gaap"]
+        gaap["RevenueFromContractWithCustomerExcludingAssessedTax"] = {"units": {"USD": [
+            _fact(889e6, "2025-01-01", "2025-12-31"),
+            _q(220e6, "2026-01-01", "2026-06-30"),
+            _q(210e6, "2025-01-01", "2025-06-30"),
+        ]}}
+        gaap["Revenues"] = {"units": {"USD": [
+            _fact(55_000e6, "2025-01-01", "2025-12-31"),
+            _fact(2_000e6, "2024-01-01", "2024-12-31", filed="2025-02-20"),
+            _q(27_123e6, "2026-01-01", "2026-06-30"),
+            _q(27_501e6, "2025-01-01", "2025-06-30"),
+        ]}}
+        rows = sec.build_financials(facts)
+        fy = next(r for r in rows if r["fiscal_year"] == 2025 and r["period_type"] == "FY")
+        self.assertEqual(fy["revenue"], 55_000.0)          # 889 < 0.2 x 55,000 -> sub-line
+        ltm = next(r for r in rows if r["period_type"] == "LTM")
+        self.assertEqual(ltm["revenue"], 54_622.0)         # 55,000 + 27,123 - 27,501, on the FY's own tag
+        guarded = sec.duration_entries(facts, sec.TAGS["revenue"], sub_line_guard=True)
+        self.assertEqual(guarded[2025]["tag"], "Revenues")
+        self.assertEqual(sec.duration_entries(facts, sec.TAGS["revenue"])[2025]["tag"],
+                         "RevenueFromContractWithCustomerExcludingAssessedTax")  # no guard: preference wins
+
+    def test_ltm_tries_the_fiscal_year_tag_first(self):
+        facts = ltm_fixture()
+        # A preferred tag with a YTD but no FY figure must not displace the FY's own tag.
+        facts["facts"]["us-gaap"]["NetIncomeLoss"]["units"]["USD"] = [
+            e for e in facts["facts"]["us-gaap"]["NetIncomeLoss"]["units"]["USD"] if e["form"] == "10-Q"]
+        facts["facts"]["us-gaap"]["ProfitLoss"] = {"units": {"USD": [
+            _fact(155e6, "2025-01-01", "2025-12-31"),
+            _q(95e6, "2026-01-01", "2026-06-30"), _q(80e6, "2025-01-01", "2025-06-30")]}}
+        ltm = sec.build_financials(facts)[-1]
+        self.assertEqual(ltm["net_income"], 170.0)         # 155 + (95 - 80) on ProfitLoss; NOT 155 + (90 - 70)
+
     def test_leap_day_comparable(self):
         self.assertEqual(sec._year_earlier(date(2024, 2, 29)), date(2023, 2, 28))
 
