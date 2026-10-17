@@ -1,0 +1,5 @@
+<% if payload[:bullets].present? %>
+<%= render "decks/slides/bullets", bullets: payload[:bullets] %>
+<% else %>
+<p><%= payload[:body] %></p>
+<% end %>

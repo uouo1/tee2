@@ -1,0 +1,14 @@
+<% f = Pitchbooks::Slides::Format %>
+<p><%= payload[:description] %></p>
+<div class="grid kpis" style="margin-top:16px">
+<% Array(payload[:kpis]).each do |k| %>
+  <div class="kpi"><div class="label"><%= k[:label] %></div><div class="value"><%= k[:value] %></div></div>
+<% end %>
+</div>
+<% extracted = Array(payload[:extracted_kpis]) %>
+<% if extracted.any? %>
+<p class="note"><strong>Company-level metrics extracted from the corpus</strong><br>
+<% extracted.each do |k| %><span class="pill"><%= k[:label] %>: <%= k[:value] %> (<%= k[:observations] %> obs.<% if k[:period].present? %>, latest <%= f.date(k[:period]) %><% end %>)</span><% end %>
+</p>
+<% end %>
+<p class="footnote">Multiples on <%= payload[:basis_label] %>; price as of <%= f.date(payload[:price_date]) %>; balance sheet as of <%= f.date(payload[:balance_sheet_date]) %>.<% if payload[:debt_note].present? %> <%= payload[:debt_note] %><% end %></p>

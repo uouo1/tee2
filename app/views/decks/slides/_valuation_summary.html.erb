@@ -1,0 +1,32 @@
+<% f = Pitchbooks::Slides::Format %>
+<% currency = payload[:currency].presence || "USD" %>
+<% ranges = Array(payload[:ranges]) %>
+<% concluded = payload[:concluded_range] || {} %>
+<% methods = Array(payload[:methods].presence || concluded[:methods]) %>
+<%= raw Charts.football_field_svg(ranges, reference_price: payload[:reference_price], concluded: concluded, currency_symbol: f.symbol(currency)) %>
+<% if concluded[:low].nil? || concluded[:high].nil? %>
+<p class="note">The methods could not be bridged to a per-share value, so no concluded range is stated.<% if payload[:dcf_note].present? %> <%= payload[:dcf_note] %><% end %></p>
+<% else %>
+<p class="note">Implied value at peer multiples and DCF of <%= f.price(concluded[:low], currency) %>–<%= f.price(concluded[:high], currency) %> per share: the median low and median high of the <%= methods.size %> <%= methods.size == 1 ? "method" : "methods" %> in the conclusion (<%= methods.join(", ") %>).<% if ranges.any? { |r| r[:reference] } %> The 52-week range is shown for reference only.<% end %><% unless payload[:reference_price].nil? %> Current price <%= f.price(payload[:reference_price], currency) %><% if payload[:price_date].present? %> as of <%= f.date(payload[:price_date]) %><% end %>.<% end %></p>
+<% end %>
+<div class="table-scroll" style="margin-top:16px">
+<table class="data-table">
+<caption class="viz-caption">Implied value per share (<%= currency %>); multiples on <%= payload[:basis_label] %></caption>
+<thead><tr><th scope="col">Methodology</th><th scope="col" class="num">Low</th><th scope="col" class="num">High</th><th scope="col" class="num">Midpoint</th><th scope="col">Basis</th><th scope="col">In conclusion</th></tr></thead>
+<tbody>
+<% ranges.each do |r| %>
+<tr class="<%= r[:reference] ? 'is-reference' : (r[:in_conclusion] == false ? 'is-excluded' : '') %>">
+<td><%= r[:method] %></td>
+<td class="num"><%= r[:low].nil? ? "n/a" : Charts.number(r[:low], decimals: 2) %></td>
+<td class="num"><%= r[:high].nil? ? "n/a" : Charts.number(r[:high], decimals: 2) %></td>
+<td class="num"><%= r[:mid].nil? ? "n/a" : Charts.number(r[:mid], decimals: 2) %></td>
+<td><%= r[:basis] %></td>
+<td><%= r[:reference] ? "Reference only" : (r[:in_conclusion] == false ? "Excluded" : "Yes") %></td>
+</tr>
+<% end %>
+</tbody>
+</table>
+</div>
+<% ranges.select { |r| r[:note].present? }.each do |r| %>
+<p class="footnote"><%= r[:method] %>: <%= r[:note] %></p>
+<% end %>

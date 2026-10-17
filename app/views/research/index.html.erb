@@ -1,0 +1,147 @@
+<% content_for :title, @query.present? ? "Research: #{@query}" : "Research" %>
+<% total = @result[:total_documents].to_i %>
+<% facets = @result[:facets] || {} %>
+<section class="view" id="view-research" data-controller="pin-dialog">
+  <%= form_with url: research_path, method: :get, local: true, class: "searchbar", id: "search-form",
+                html: { role: "search" } do %>
+    <div class="search-input">
+      <%= search_field_tag :q, @query, id: "q", autocomplete: "off",
+                           placeholder: "Search filings, transcripts, research and expert calls…",
+                           "aria-label": "Search the research corpus" %>
+      <button class="primary" type="submit">Search</button>
+    </div>
+    <%# A new query keeps the facet filters already chosen, as the reference's
+        state.filters did; the facet links below remove them. %>
+    <% @filters.each do |key, value| %>
+      <% Array(value).each do |item| %>
+        <%= hidden_field_tag(ResearchController::MULTI_FILTERS.include?(key) ? "#{key}[]" : key, item, id: nil) %>
+      <% end %>
+    <% end %>
+    <p class="hint">
+      Phrases in quotes, <code>-exclude</code> a term, <code>a OR b</code>, or scope with
+      <code>type:press-release</code> / <code>ticker:ITRI</code> / <code>date:2025</code>.
+      <%# Unticked checkboxes send nothing; the hidden 0 makes "off" explicit. %>
+      <%= hidden_field_tag :expand, "0", id: nil %>
+      <label class="inline"><%= check_box_tag :expand, "1", @expand, id: "expand" %> Expand synonyms</label>
+    </p>
+    <div class="examples" id="examples">
+      <% @examples.each do |example| %>
+        <%= link_to example, research_path(research_params.merge(q: example)), class: "chip" %>
+      <% end %>
+    </div>
+  <% end %>
+
+  <div class="results-layout">
+    <aside class="facets" id="facets" aria-label="Filters">
+      <% groups = [[:doc_type, "Document type"], [:ticker, "Company"], [:sentiment, "Tone"], [:year, "Year"]] %>
+      <% shown = 0 %>
+      <% groups.each do |key, heading| %>
+        <% rows = facets[key] || [] %>
+        <% next if rows.empty? %>
+        <% shown += 1 %>
+        <div class="facet-group">
+          <h3><%= heading %></h3>
+          <% rows.each do |row| %>
+            <% value = row[:value].to_s %>
+            <% if key == :year %>
+              <% selected = year_selected?(value) %>
+              <% href = year_path(value) %>
+            <% else %>
+              <% selected = Array(@filters[key]).include?(value) %>
+              <% href = toggle_path(key, value) %>
+            <% end %>
+            <%= link_to href, class: "facet-item", "aria-pressed": selected.to_s do %>
+              <span><%= value %></span><span class="count"><%= num(row[:count]) %></span>
+            <% end %>
+          <% end %>
+        </div>
+      <% end %>
+      <% if shown.zero? %><p class="empty">No filters.</p><% end %>
+    </aside>
+
+    <div class="results">
+      <div class="results-head">
+        <div id="results-meta" class="muted small" role="status" aria-live="polite">
+          <% bits = ["#{num(total)} document#{'s' unless total == 1}", "#{@result[:took_ms]} ms"] %>
+          <% bits << "matched on #{@result[:match_expression]}" if @result[:expanded] && @result[:match_expression].present? %>
+          <%= bits.join(" · ") %>
+        </div>
+        <%= button_to "Save this search", saved_searches_path, method: :post, class: "ghost small", id: "save-search",
+                      params: research_params.except(:q).merge(query: @query, name: @query) %>
+      </div>
+
+      <% summary = @result[:summary] %>
+      <div id="summary">
+        <% if summary && summary[:bullets].present? %>
+          <div class="summary-card">
+            <h2>What the top matches say</h2>
+            <ul>
+              <% summary[:bullets].each do |bullet| %>
+                <li>
+                  <%= bullet[:text] %>
+                  <%= link_to [bullet[:ticker].presence || "—", bullet[:title], iso(bullet[:published_at])].join(" · "),
+                              document_path_for(bullet[:document_id]), class: "cite" %>
+                </li>
+              <% end %>
+            </ul>
+            <p class="small muted">
+              Aggregate tone <%= tone(summary[:sentiment]) %> (<%= summary[:sentiment_label] || "n/a" %>).
+              <% if summary[:themes].present? %>Themes: <%= summary[:themes].first(6).map { |t| t[:theme] }.join(", ") %>.<% end %>
+            </p>
+          </div>
+        <% end %>
+      </div>
+
+      <div id="results">
+        <% if @result[:results].empty? %>
+          <p class="empty">No matches. Try fewer terms, or switch synonym expansion on.</p>
+        <% end %>
+        <% @result[:results].each do |row| %>
+          <article class="result<%= ' is-active' if @active_document_id == row[:document_id] %>">
+            <div class="title"><%= link_to row[:title], document_path_for(row[:document_id]) %></div>
+            <div class="meta">
+              <% if row[:ticker].present? %><span class="pill ticker"><%= row[:ticker] %></span><% end %>
+              <span class="pill"><%= row[:doc_type] %></span>
+              <span><%= iso(row[:published_at]) %></span>
+              <% if row[:source].present? %><span><%= row[:source] %></span><% end %>
+              <%= sentiment_pill(row[:chunk_sentiment], row[:sentiment_label]) %>
+              <% if row[:match_count].to_i > 1 %><span class="pill"><%= row[:match_count] %> passages</span><% end %>
+            </div>
+            <%# Search escapes the passage text and then adds only <mark> tags. %>
+            <p class="snippet"><%= row[:snippet_html].to_s.html_safe %></p>
+            <div class="actions">
+              <% quote = CGI.unescapeHTML(strip_tags(row[:snippet_html].to_s)).delete_prefix("…").delete_suffix("…").strip %>
+              <%= render "shared/pin_button", quote: quote, document_id: row[:document_id], chunk_id: row[:chunk_id] %>
+            </div>
+          </article>
+        <% end %>
+      </div>
+
+      <% if total > ResearchController::PAGE_SIZE %>
+        <% page_size = ResearchController::PAGE_SIZE %>
+        <nav class="pager" aria-label="Result pages">
+          <% if @offset.positive? %>
+            <%= link_to "← Previous", page_path([@offset - page_size, 0].max), class: "ghost small" %>
+          <% end %>
+          <span class="muted"><%= num(@offset + 1) %>–<%= num([@offset + page_size, total].min) %> of <%= num(total) %></span>
+          <% if @offset + page_size < total %>
+            <%= link_to "Next →", page_path(@offset + page_size), class: "ghost small" %>
+          <% end %>
+        </nav>
+      <% end %>
+    </div>
+
+    <aside class="reader" id="reader" aria-label="Document reader">
+      <% if @document %>
+        <%= render "shared/document_reader", doc: @document, full_page: true,
+                                             similar_href: ->(id) { document_path_for(id) } %>
+      <% elsif @active_document_id %>
+        <p class="empty">Could not open document <%= @active_document_id %>: not found.</p>
+      <% else %>
+        <p class="empty">Open a result to read it here.</p>
+      <% end %>
+    </aside>
+  </div>
+
+  <%= render "shared/pin_dialog", pitchbooks: @pitchbooks %>
+</section>

@@ -1,0 +1,108 @@
+<% content_for :title, "Monitor" %>
+<section class="view" id="view-monitor">
+  <div class="view-head">
+    <h1>Monitor</h1>
+    <p class="muted">Saved searches raise alerts when new documents match. Watchlists group the names you follow.</p>
+  </div>
+
+  <div class="panel-grid">
+    <div class="panel">
+      <h2>Alerts</h2>
+      <div id="alerts">
+        <% if @alerts.empty? %>
+          <p class="empty">Save a search from the Research tab to start monitoring it.</p>
+        <% elsif @live_alerts.empty? %>
+          <p class="empty">No new documents match your saved searches.</p>
+        <% else %>
+          <% @live_alerts.each do |alert| %>
+            <div class="panel alert">
+              <%# new_documents is the true count of new matching documents, not the page of hits below. %>
+              <h3><%= alert[:name] %> — <%= num(alert[:new_documents]) %> new</h3>
+              <% Array(alert[:hits]).first(4).each do |hit| %>
+                <%= render "shared/document_card", title: hit[:title], href: document_path(hit[:document_id], q: alert[:query]),
+                                                   ticker: hit[:ticker], doc_type: hit[:doc_type],
+                                                   published_at: hit[:published_at], sentiment: hit[:doc_sentiment] %>
+              <% end %>
+              <% if alert[:new_documents].to_i > 4 %>
+                <p class="small"><%= link_to "See all #{num(alert[:new_documents])} in Research", research_path(q: alert[:query]) %></p>
+              <% end %>
+            </div>
+          <% end %>
+        <% end %>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Saved searches</h2>
+      <div id="saved-searches">
+        <% if @saved_searches.empty? %>
+          <p class="empty">Nothing saved yet.</p>
+        <% end %>
+        <% @saved_searches.each do |saved| %>
+          <% filters = saved.filters_hash %>
+          <div class="row">
+            <%= link_to research_path(filters.merge(q: saved.query)), class: "company-item" do %>
+              <span><%= saved.name %></span>
+              <span class="sub"><%= saved.query %><%= " · #{filters.map { |k, v| "#{k}: #{Array(v).join(', ')}" }.join(' · ')}" if filters.any? %></span>
+            <% end %>
+            <%= button_to "Remove", saved_search_path(saved), method: :delete, class: "ghost small" %>
+          </div>
+        <% end %>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Watchlists</h2>
+    <%= form_with url: watchlists_path, method: :post, local: true, class: "row", id: "watchlist-form" do %>
+      <%= text_field_tag :name, "", id: "watchlist-name", placeholder: "New watchlist name", "aria-label": "New watchlist name" %>
+      <button class="primary" type="submit">Create</button>
+    <% end %>
+    <div id="watchlists">
+      <% if @watchlists.empty? %>
+        <p class="empty">No watchlists yet.</p>
+      <% end %>
+      <% @watchlists.each do |list| %>
+        <% members = @watchlist_companies[list.id] %>
+        <div class="panel" id="watchlist-<%= list.id %>">
+          <div class="book-toolbar">
+            <strong><%= list.name %></strong>
+            <span class="spacer"></span>
+            <%= button_to "Delete list", watchlist_path(list), method: :delete, class: "ghost small",
+                          form: { data: { turbo_confirm: "Delete the watchlist “#{list.name}”?" } } %>
+          </div>
+          <% if members.empty? %>
+            <p class="empty">Empty list.</p>
+          <% else %>
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr><th scope="col">Ticker</th><th scope="col">Company</th><th scope="col" class="num">Tone</th>
+                      <th scope="col">Latest document</th><th scope="col"><span class="skip">Actions</span></th></tr>
+                </thead>
+                <tbody>
+                  <% members.each do |row| %>
+                    <tr>
+                      <td><%= link_to row[:ticker], company_path(row[:ticker]) %></td>
+                      <td><%= row[:name] %></td>
+                      <td class="num"><%= tone(row[:sentiment]) %></td>
+                      <td><%= iso(row[:latest]) %></td>
+                      <td class="num"><%= button_to "Remove", watchlist_item_path(list, row[:ticker]), method: :delete,
+                                                    class: "ghost small", "aria-label": "Remove #{row[:ticker]} from #{list.name}" %></td>
+                    </tr>
+                  <% end %>
+                </tbody>
+              </table>
+            </div>
+          <% end %>
+          <%= form_with url: watchlist_items_path(list), method: :post, local: true, class: "row", html: { style: "margin-top:10px" } do %>
+            <% options = @companies.reject { |ticker, _| members.any? { |m| m[:ticker] == ticker } } %>
+            <%= select_tag :ticker, options_for_select(options.map { |ticker, name| ["#{ticker} — #{name}", ticker] }),
+                           id: nil, "aria-label": "Add a company to #{list.name}" %>
+            <button class="ghost" type="submit">Add</button>
+          <% end %>
+        </div>
+      <% end %>
+    </div>
+  </div>
+</section>

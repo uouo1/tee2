@@ -1,7 +1,8 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
   <head>
-    <title><%= content_for(:title) || "Argos" %></title>
+    <meta charset="utf-8">
+    <title><%= content_for?(:title) ? "#{yield(:title)} — Argos" : "Argos — Research & Pitch Books" %></title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="application-name" content="Argos">
@@ -9,21 +10,71 @@
     <%= csrf_meta_tags %>
     <%= csp_meta_tag %>
 
+    <%# Apply a stored theme before first paint so a dark choice does not flash
+        light while the scripts load; the theme controller owns the toggle. %>
+    <script>
+      try { var t = localStorage.getItem("argos-theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+    </script>
+
     <%= yield :head %>
 
-    <%# Enable PWA manifest for installable apps (make sure to enable in config/routes.rb too!) %>
-    <%#= tag.link rel: "manifest", href: pwa_manifest_path(format: :json) %>
-
-    <link rel="icon" href="/icon.png" type="image/png">
-    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%232a78d6'/><path d='M8 22 L13 10 L18 22' stroke='white' stroke-width='2.4' fill='none' stroke-linejoin='round'/><line x1='21' y1='10' x2='21' y2='22' stroke='white' stroke-width='2.4'/></svg>">
     <link rel="apple-touch-icon" href="/icon.png">
 
-    <%# Includes all stylesheet files in app/assets/stylesheets %>
+    <%# Palette tokens first: application.css only ever reads var(--…). %>
+    <%= stylesheet_link_tag tokens_css_path, "data-turbo-track": "reload" %>
     <%= stylesheet_link_tag :app, "data-turbo-track": "reload" %>
     <%= javascript_importmap_tags %>
   </head>
 
-  <body>
-    <%= yield %>
+  <body class="viz">
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="topbar">
+      <div class="brand">
+        <span class="mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32" width="26" height="26"><rect width="32" height="32" rx="7" fill="var(--series-1)"/><path d="M8 22 L13 10 L18 22" stroke="#fff" stroke-width="2.4" fill="none" stroke-linejoin="round"/><line x1="21" y1="10" x2="21" y2="22" stroke="#fff" stroke-width="2.4"/></svg>
+        </span>
+        <div>
+          <strong><%= link_to "Argos", root_path, style: "color:inherit;text-decoration:none" %></strong>
+          <span class="tagline">Research intelligence &amp; pitch books</span>
+        </div>
+      </div>
+      <%# The section a page belongs to is its controller; pitch-book pages
+          (pitchbooks, slides, evidences) all light the same tab. %>
+      <% section = case controller_name
+                   when "dashboard" then "dashboard"
+                   when "research", "documents", "saved_searches" then "research"
+                   when "companies" then "companies"
+                   when "pitchbooks", "slides", "evidences" then "pitchbooks"
+                   when "monitor", "watchlists", "watchlist_items" then "monitor"
+                   end %>
+      <nav class="tabs" aria-label="Sections">
+        <% [["dashboard", "Dashboard", root_path], ["research", "Research", research_path],
+            ["companies", "Companies", companies_path], ["pitchbooks", "Pitch books", pitchbooks_path],
+            ["monitor", "Monitor", monitor_path]].each do |key, label, href| %>
+          <%= link_to label, href, class: "tab", "aria-current": (section == key ? "page" : nil) %>
+        <% end %>
+      </nav>
+      <div class="topbar-actions">
+        <%# Corpus stamp: "as of" is the newest document date, never today. %>
+        <% stamp_count = Document.count %>
+        <% stamp_as_of = Document.maximum(:published_at) %>
+        <span id="corpus-stamp" class="stamp" title="Corpus coverage">
+          <%= number_with_delimiter(stamp_count) %> documents · as of <%= stamp_as_of ? stamp_as_of.to_s[0, 10] : "n/a" %>
+        </span>
+        <button id="theme-toggle" class="ghost" type="button" aria-label="Switch colour theme"
+                data-controller="theme" data-action="theme#toggle">Theme</button>
+      </div>
+    </header>
+
+    <main id="main" tabindex="-1">
+      <%= yield %>
+    </main>
+
+    <%# Flash messages render in the toast the Python UI used for feedback; the
+        CSS fades them out. The pin dialog reuses the same element. %>
+    <% flash_message = flash[:alert] || flash[:notice] %>
+    <div id="toast" class="toast<%= " flash" if flash_message %><%= " alert" if flash[:alert] %>"
+         role="status" aria-live="polite" <%= "hidden" unless flash_message %>><%= flash_message %></div>
   </body>
 </html>

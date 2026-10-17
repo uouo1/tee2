@@ -1,0 +1,258 @@
+<% content_for :title, "#{@profile[:name]} (#{@profile[:ticker]})" %>
+<%
+  metrics = @metrics
+  market = @market
+  basis = metrics[:valuation_basis] || {}
+  basis_label = metrics[:basis_label].presence || "n/a"
+  ntm = metrics[:ntm]
+  bridge = metrics[:ev_bridge] || {}
+  # Without a quote there is no price or market cap: show n/a, not the 0.0
+  # Valuation uses internally for a missing price.
+  share_price = market[:share_price]
+  shares = market[:shares_diluted]
+  market_cap = share_price.nil? || shares.nil? ? nil : metrics[:market_cap]
+  enterprise_value = market_cap.nil? ? nil : metrics[:enterprise_value]
+%>
+<section class="view" id="view-companies">
+  <div class="company-layout">
+    <%= render "companies/list", companies: @companies, active: @profile[:ticker] %>
+
+    <div class="company-detail" id="company-detail">
+      <div class="panel">
+        <h1><%= @profile[:name] %> (<%= @profile[:ticker] %>)</h1>
+        <p class="muted small">
+          <%= [@profile[:industry].presence, @profile[:hq].presence, "#{num(@profile[:employees])} employees"].compact.join(" · ") %>
+        </p>
+        <% if @profile[:description].present? %><p><%= @profile[:description] %></p><% end %>
+        <div class="tiles">
+          <div class="tile">
+            <div class="label">Share price</div>
+            <div class="value"><%= price(share_price, @currency) %></div>
+            <div class="delta"><%= market[:as_of] ? "as of #{iso(market[:as_of])}" : "no quote loaded" %></div>
+          </div>
+          <div class="tile">
+            <div class="label">Market cap</div>
+            <div class="value"><%= money(market_cap, @currency) %></div>
+            <div class="delta">EV <%= money(enterprise_value, @currency) %></div>
+          </div>
+          <div class="tile">
+            <div class="label">EV / EBITDA <span class="basis"><%= basis_label %></span></div>
+            <div class="value"><%= mult(enterprise_value && basis[:ev_ebitda]) %></div>
+            <div class="delta">EV/Revenue <%= mult(enterprise_value && basis[:ev_revenue]) %> · P/E <%= mult(share_price && basis[:pe]) %> (<%= basis_label %>)</div>
+          </div>
+          <% if ntm %>
+            <div class="tile">
+              <div class="label">EV / EBITDA <span class="basis">NTM</span></div>
+              <div class="value"><%= mult(enterprise_value && ntm[:ev_ebitda]) %></div>
+              <div class="delta">
+                EV/Revenue <%= mult(enterprise_value && ntm[:ev_revenue]) %> · P/E <%= mult(share_price && ntm[:pe]) %> (NTM)
+                <% if ntm[:ebitda_derived] %><br>EBITDA derived at current margin<% end %>
+              </div>
+            </div>
+          <% end %>
+          <div class="tile">
+            <div class="label">EBITDA margin <span class="basis"><%= basis_label %></span></div>
+            <div class="value"><%= pct(basis[:ebitda_margin]) %></div>
+            <div class="delta"><%= basis_label %></div>
+          </div>
+          <div class="tile">
+            <div class="label">Corpus tone</div>
+            <div class="value"><%= tone(@profile[:sentiment]) %></div>
+            <div class="delta"><%= num(@profile[:document_count]) %> documents<%= " · #{@profile[:sentiment_label]}" if @profile[:sentiment_label] %></div>
+          </div>
+        </div>
+      </div>
+
+      <%# Charts are Charts SVG strings: every label is escaped by Charts. %>
+      <div class="panel-grid">
+        <div class="panel"><div class="chart-slot"><%= @charts[:revenue].html_safe %></div></div>
+        <div class="panel"><div class="chart-slot"><%= @charts[:margin].html_safe %></div></div>
+      </div>
+      <div class="panel-grid">
+        <div class="panel"><div class="chart-slot"><%= @charts[:sentiment].html_safe %></div></div>
+        <div class="panel"><div class="chart-slot"><%= @charts[:volume].html_safe %></div></div>
+      </div>
+
+      <div class="panel-grid">
+        <div class="panel" id="ev-bridge">
+          <h2>Enterprise value bridge</h2>
+          <table class="bridge">
+            <tbody>
+              <tr><td>Share price<%= " (#{iso(bridge[:price_date])})" if bridge[:price_date] %></td>
+                  <td class="num"><%= price(share_price, @currency) %></td></tr>
+              <tr><td>× <%= @share_basis[:label] %> (m)</td><td class="num"><%= num(shares, 2) %></td></tr>
+              <tr class="total"><td>= Market capitalisation</td><td class="num"><%= money(market_cap, @currency) %></td></tr>
+              <tr>
+                <td>+ Net debt
+                  <% if bridge[:balance_sheet_date] || bridge[:balance_sheet_form] %>
+                    (balance sheet <%= iso(bridge[:balance_sheet_date]) %><%= ", #{bridge[:balance_sheet_form]}" if bridge[:balance_sheet_form].present? %>)
+                  <% else %>
+                    (balance-sheet date n/a)
+                  <% end %>
+                </td>
+                <td class="num"><%= money(bridge[:net_debt], @currency) %></td>
+              </tr>
+              <tr><td>+ Non-controlling interest</td><td class="num"><%= money(bridge[:minority_interest], @currency) %></td></tr>
+              <tr><td>+ Preferred equity</td><td class="num"><%= money(bridge[:preferred_equity], @currency) %></td></tr>
+              <tr class="total"><td>= Enterprise value</td><td class="num"><%= money(enterprise_value, @currency) %></td></tr>
+            </tbody>
+          </table>
+          <% if metrics[:debt_note].present? %>
+            <p class="footnote" id="debt-note"><%= metrics[:debt_note] %></p>
+          <% end %>
+          <% if market.present? && market[:net_debt].nil? %>
+            <p class="footnote">Net debt is unknown (no debt or cash line was found), so enterprise value and EV multiples are not computed.</p>
+          <% end %>
+          <p class="footnote" id="share-basis"><%= @share_basis[:detail] %></p>
+        </div>
+
+        <div class="panel" id="multiples">
+          <h2>Trading multiples</h2>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr><th scope="col">Period</th><th scope="col" class="num">EV/Revenue</th><th scope="col" class="num">EV/EBITDA</th>
+                    <th scope="col" class="num">P/E</th><th scope="col" class="num">EBITDA margin</th></tr>
+              </thead>
+              <tbody>
+                <%
+                  rows = []
+                  rows << [basis_label, basis, "valuation basis"] if basis.present?
+                  latest = metrics[:latest_actual]
+                  # With an LTM row the last fiscal year is shown too, labelled.
+                  rows << [latest[:basis], latest, nil] if latest.present? && latest[:basis] != basis_label
+                  rows << ["NTM", ntm, ntm[:ebitda_derived] ? "EBITDA derived at current margin" : nil] if ntm
+                  Array(metrics[:forward]).each { |row| rows << ["#{row[:basis]}E", row, "estimate"] }
+                %>
+                <% if rows.empty? %>
+                  <tr><td colspan="5" class="empty">No financials loaded.</td></tr>
+                <% end %>
+                <% rows.each do |label, row, note| %>
+                  <tr<%= ' class="is-highlight"'.html_safe if note == "valuation basis" %>>
+                    <td><%= label %><% if note %> <span class="basis"><%= note %></span><% end %></td>
+                    <td class="num"><%= mult(enterprise_value && row[:ev_revenue]) %></td>
+                    <td class="num"><%= mult(enterprise_value && row[:ev_ebitda]) %></td>
+                    <td class="num"><%= mult(share_price && row[:pe]) %></td>
+                    <td class="num"><%= row.key?(:ebitda_margin) ? pct(row[:ebitda_margin]) : "n/a" %></td>
+                  </tr>
+                <% end %>
+              </tbody>
+            </table>
+          </div>
+          <% if ntm %>
+            <p class="footnote">NTM blends FY<%= Array(ntm[:fiscal_years]).join(" and FY") %> by the share of the current year still ahead (<%= pct(ntm[:weight_current_year], 0) %> current year); source: <%= ntm[:source].presence || "n/a" %>.</p>
+          <% end %>
+          <p class="footnote">Multiples are quoted on <%= basis_label %> (the trailing twelve months when a 10-Q extends the last fiscal year, else the last fiscal year), at the price of <%= iso(market[:as_of]) %>.
+            EBITDA is GAAP operating income plus depreciation and amortisation, with no adjustments.</p>
+        </div>
+      </div>
+
+      <div class="panel-grid">
+        <div class="panel" id="kpis">
+          <h2>Metrics extracted from the corpus</h2>
+          <% if @profile[:kpis].present? %>
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr><th scope="col">Metric</th><th scope="col" class="num">Latest</th><th scope="col">Period</th>
+                      <th scope="col">Measure</th><th scope="col" class="num">Obs.</th></tr>
+                </thead>
+                <tbody>
+                  <% @profile[:kpis].each do |bucket| %>
+                    <tr>
+                      <td>
+                        <%= bucket[:label] %>
+                        <%# A segment column or a flattened table row is not a company-level figure (item 20). %>
+                        <% if bucket[:segment_or_table] %>
+                          <span class="pill flag" title="<%= bucket[:latest_context] %>">segment / table row — not company-level</span>
+                        <% end %>
+                      </td>
+                      <td class="num"><%= kpi_value(bucket[:latest], bucket[:unit]) %></td>
+                      <td><%= iso(bucket[:period]) %></td>
+                      <td><%= bucket[:measure].presence || "n/a" %></td>
+                      <td class="num"><%= num(bucket[:observations]) %></td>
+                    </tr>
+                  <% end %>
+                </tbody>
+              </table>
+            </div>
+            <p class="footnote">Latest is the newest company-level sentence; "adjusted" or "GAAP" is shown when the sentence says which measure it quotes.</p>
+          <% else %>
+            <p class="empty">No metrics parsed yet.</p>
+          <% end %>
+        </div>
+        <div class="panel">
+          <h2>Themes in recent disclosure</h2>
+          <div class="examples">
+            <% if @profile[:themes].present? %>
+              <% @profile[:themes].each do |theme| %>
+                <%= link_to "#{theme[:theme]} · #{theme[:lift]}x",
+                            research_path(q: %("#{theme[:theme]}" ticker:#{@profile[:ticker]})), class: "chip" %>
+              <% end %>
+            <% else %>
+              <p class="empty">No emerging themes for this company.</p>
+            <% end %>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" id="financials">
+        <h2>Financials <span class="basis"><%= @currency %>m except per share</span></h2>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Period</th><th scope="col">Source</th>
+                <th scope="col" class="num">Revenue</th><th scope="col" class="num">EBITDA</th>
+                <th scope="col" class="num">EBIT</th><th scope="col" class="num">Net income</th>
+                <th scope="col" class="num">EPS</th><th scope="col" class="num">Capex</th>
+              </tr>
+            </thead>
+            <tbody>
+              <% if @profile[:financials].blank? %>
+                <tr><td colspan="8" class="empty">No financials loaded.</td></tr>
+              <% end %>
+              <% Array(@profile[:financials]).each do |row| %>
+                <%
+                  ltm = row[:period_type] == "LTM"
+                  label = ltm ? Valuation.basis_label(row) : "FY#{row[:fiscal_year]}#{'E' if row[:is_estimate]}"
+                  source =
+                    if ltm then "Trailing twelve months to #{iso(row[:period_end])}"
+                    elsif row[:is_estimate] then row[:estimate_source].presence || "Estimate"
+                    else "Reported"
+                    end
+                %>
+                <tr class="<%= 'is-ltm' if ltm %><%= 'is-estimate' if row[:is_estimate] %>">
+                  <td><%= label %></td>
+                  <td><%= source %></td>
+                  <td class="num"><%= num(row[:revenue]) %></td>
+                  <td class="num"><%= num(row[:ebitda]) %></td>
+                  <td class="num"><%= num(row[:ebit]) %></td>
+                  <td class="num"><%= num(row[:net_income]) %></td>
+                  <td class="num"><%= num(row[:eps], 2) %></td>
+                  <td class="num"><%= num(row[:capex]) %></td>
+                </tr>
+              <% end %>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel" id="documents">
+        <h2>Documents</h2>
+        <% if @profile[:documents].blank? %><p class="empty">No documents for this company yet.</p><% end %>
+        <% Array(@profile[:documents]).each do |row| %>
+          <%= render "shared/document_card", title: row[:title], href: document_path(row[:id]), ticker: @profile[:ticker],
+                                             doc_type: row[:doc_type], published_at: row[:published_at],
+                                             sentiment: row[:sentiment] %>
+        <% end %>
+      </div>
+
+      <div class="panel">
+        <h2>Build a pitch book on this name</h2>
+        <%= button_to "Generate deck for #{@profile[:ticker]}", pitchbook_company_path(@profile[:ticker]),
+                      method: :post, class: "primary" %>
+      </div>
+    </div>
+  </div>
+</section>

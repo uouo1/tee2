@@ -1,0 +1,7 @@
+<%# A missing company or document: a page, not a stack trace (status 404). %>
+<% content_for :title, "Not found" %>
+<div class="panel error-page">
+  <h1><%= what %> not found</h1>
+  <p class="muted">It may have been removed, or the link is mistyped.</p>
+  <p><%= link_to "Back to the dashboard", root_path %></p>
+</div>

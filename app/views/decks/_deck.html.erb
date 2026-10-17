@@ -1,0 +1,8 @@
+<%# The deck body: one <section class="slide"> per slide, shared by the in-app
+    preview (pitchbooks#show / #preview) and the standalone HTML export, so the
+    two cannot drift. `deck` is anything with #slides whose slides respond to
+    #kind, #title, #subtitle and #payload_hash. %>
+<% slides = deck.slides.to_a %>
+<% slides.each_with_index do |slide, index| %>
+<%= render "decks/slides/shell", slide: slide, index: index + 1, total: slides.size %>
+<% end %>

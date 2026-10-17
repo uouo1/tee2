@@ -1,0 +1,21 @@
+<% content_for(:title, "Pitch books · Argos") %>
+<div class="view-head">
+  <h1>Pitch books</h1>
+  <p class="muted">Generated from the same corpus and market data the research module indexes.</p>
+</div>
+<div class="book-layout">
+  <aside class="book-list">
+    <%= render "pitchbooks/new_form" %>
+    <div class="panel">
+      <h2>Existing decks</h2>
+      <%= render "pitchbooks/deck_list", pitchbooks: @pitchbooks %>
+    </div>
+  </aside>
+  <div class="book-detail">
+    <% if @pitchbooks.empty? %>
+      <p class="empty">No decks yet. Generate one from a target company.</p>
+    <% else %>
+      <p class="empty">Select a deck to preview, edit or export it.</p>
+    <% end %>
+  </div>
+</div>

@@ -1,0 +1,43 @@
+<% f = Pitchbooks::Slides::Format %>
+<% currency = payload[:currency].presence || "USD" %>
+<% target = (payload[:target] || {}).to_h %>
+<% rows = Array(payload[:rows]) %>
+<% all_rows = (target.present? ? [target] : []) + rows %>
+<% charted = all_rows.reject { |r| r[:ev_ebitda].nil? } %>
+<% highlight = charted.index { |r| r[:is_target] } %>
+<%= raw Charts.column_chart_svg(charted.map { |r| r[:ticker].to_s }, charted.map { |r| r[:ev_ebitda].to_f }, title: "EV / EBITDA by company (target highlighted)", value_format: f::MULT1, highlight_index: highlight) %>
+<% columns = [
+     { key: :ticker, label: "Ticker" },
+     { key: :name, label: "Company" },
+     { key: :basis, label: "Basis" },
+     { key: :share_price, label: "Price", numeric: true, format: f::DEC2 },
+     { key: :market_cap, label: "Mkt cap (#{currency}m)", numeric: true, format: f::INT },
+     { key: :enterprise_value, label: "EV (#{currency}m)", numeric: true, format: f::INT },
+     { key: :revenue, label: "Revenue", numeric: true, format: f::INT },
+     { key: :ebitda_margin, label: "EBITDA margin", numeric: true, format: f::PCT1 },
+     { key: :ev_revenue, label: "EV/Rev", numeric: true, format: f::MULT1 },
+     { key: :ev_ebitda, label: "EV/EBITDA", numeric: true, format: f::MULT1 }
+   ]
+   columns << { key: :ev_ebitda_ntm, label: "EV/NTM EBITDA", numeric: true, format: f::MULT1 } if payload[:has_ntm]
+   columns << { key: :pe, label: "P/E", numeric: true, format: f::MULT1 }
+   columns << { key: :pe_ntm, label: "NTM P/E", numeric: true, format: f::MULT1 } if payload[:has_ntm]
+   columns << { key: :share_basis, label: "Shares" } %>
+<div class="table-scroll" style="margin-top:14px">
+<%= raw Charts.table_html(columns, all_rows, highlight_key: :is_target, caption: "Target shown in the first row") %>
+</div>
+<% stats = payload[:stats] || {} %>
+<% stat_keys = [[:ev_revenue, "EV / Revenue"], [:ev_ebitda, "EV / EBITDA"], [:pe, "P / E"]] %>
+<% stat_keys += [[:ev_ebitda_ntm, "EV / NTM EBITDA"], [:pe_ntm, "NTM P / E"]] if payload[:has_ntm] %>
+<table style="margin-top:14px">
+<caption class="viz-caption">Peer distribution (excludes target)</caption>
+<thead><tr><th>Multiple</th><th class="num">Min</th><th class="num">25th</th><th class="num">Median</th><th class="num">75th</th><th class="num">Max</th><th class="num">Peers</th></tr></thead>
+<tbody>
+<% stat_keys.each do |key, label| %>
+<% bucket = stats[key] || {} %>
+<tr><th scope="row"><%= label %></th><td class="num"><%= f.mult(bucket[:min]) %></td><td class="num"><%= f.mult(bucket[:p25]) %></td><td class="num"><%= f.mult(bucket[:median]) %></td><td class="num"><%= f.mult(bucket[:p75]) %></td><td class="num"><%= f.mult(bucket[:max]) %></td><td class="num"><%= bucket[:count] || 0 %></td></tr>
+<% end %>
+</tbody>
+</table>
+<p class="footnote">Prices as of <%= f.date(payload[:price_date]) %>; balance sheets as of <%= f.date(payload[:balance_sheet_date]) %>; target multiples on <%= payload[:basis_label] %>. <%= payload[:share_count_basis] %></p>
+<% if payload[:ntm_derived] %><p class="footnote">NTM EBITDA marked derived is consensus revenue at the current margin: no public source publishes consensus EBITDA.</p><% end %>
+<p class="footnote"><%= payload[:footnote] %></p>

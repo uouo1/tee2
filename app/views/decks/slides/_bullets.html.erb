@@ -1,0 +1,10 @@
+<ul class="bullets">
+<% Array(bullets).each do |bullet| %>
+<% if bullet.is_a?(Hash) %>
+<% source = bullet[:source] %>
+<li><%= bullet[:text] %><% if source.present? %><span class="cite">Source: <%= source[:title] %> · <%= source[:doc_type] %> · <%= Pitchbooks::Slides::Format.date(source[:published_at]) %> [doc <%= source[:document_id] %>]</span><% end %></li>
+<% else %>
+<li><%= bullet %></li>
+<% end %>
+<% end %>
+</ul>

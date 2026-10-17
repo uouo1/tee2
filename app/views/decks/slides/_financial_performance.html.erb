@@ -1,0 +1,28 @@
+<% f = Pitchbooks::Slides::Format %>
+<% rows = Array(payload[:rows]) %>
+<% currency = payload[:currency].presence || "USD" %>
+<% charted = rows.reject { |r| r[:revenue].nil? } %>
+<% estimate_from = charted.index { |r| r[:is_estimate] } %>
+<div class="grid two">
+<%= raw Charts.column_chart_svg(charted.map { |r| "FY#{r[:fiscal_year]}" }, charted.map { |r| r[:revenue].to_f }, title: "Revenue (#{currency}m)", estimate_from: estimate_from, value_format: f::INT) %>
+<%= raw Charts.line_chart_svg(rows.map { |r| "FY#{r[:fiscal_year]}" }, rows.map { |r| r[:ebitda_margin].nil? ? nil : r[:ebitda_margin].to_f * 100 }, title: "EBITDA margin (%)") %>
+</div>
+<% if payload[:note].present? %><p class="note"><%= payload[:note] %></p><% end %>
+<% table_rows = rows.map { |r| r.merge(period: "FY#{r[:fiscal_year]}#{r[:is_estimate] ? ' (est.)' : ''}") } %>
+<% table_rows << payload[:ltm].merge(period: payload[:ltm][:basis].presence || "LTM") if payload[:ltm].present? %>
+<div class="table-scroll" style="margin-top:16px">
+<%= raw Charts.table_html(
+      [
+        { key: :period, label: "Period" },
+        { key: :revenue, label: "Revenue (#{currency}m)", numeric: true, format: f::INT },
+        { key: :ebitda, label: "EBITDA (#{currency}m)", numeric: true, format: f::INT },
+        { key: :ebitda_margin, label: "Margin", numeric: true, format: f::PCT1 },
+        { key: :ebit, label: "EBIT", numeric: true, format: f::INT },
+        { key: :net_income, label: "Net income", numeric: true, format: f::INT },
+        { key: :eps, label: "EPS", numeric: true, format: f::DEC2 },
+        { key: :capex, label: "Capex", numeric: true, format: f::INT }
+      ],
+      table_rows,
+      caption: "Forward years are estimates#{payload[:ltm].present? ? '; the last row is the trailing twelve months' : ''}"
+    ) %>
+</div>

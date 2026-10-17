@@ -1,0 +1,11 @@
+<%# Company sidebar (loadCompanies in app.js). Locals: companies, active. %>
+<aside class="company-list" id="company-list" aria-label="Company list">
+  <% if companies.empty? %><p class="empty">No companies loaded.</p><% end %>
+  <% companies.each do |company| %>
+    <%= link_to company_path(company[:ticker]), class: "company-item",
+                "aria-pressed": (company[:ticker] == active).to_s do %>
+      <span><%= company[:ticker] %> — <%= company[:name] %></span>
+      <span class="sub"><%= num(company[:documents]) %> docs · <%= company[:sector].presence || "—" %></span>
+    <% end %>
+  <% end %>
+</aside>

@@ -1,0 +1,12 @@
+<% content_for :title, @document[:title] %>
+<section class="view" id="view-document" data-controller="pin-dialog">
+  <div class="view-head">
+    <p class="small"><%= link_to "← Research", research_path(@query.present? ? { q: @query } : {}) %>
+      <% if @document[:ticker].present? %> · <%= link_to @document[:company] || @document[:ticker], company_path(@document[:ticker]) %><% end %></p>
+  </div>
+  <div class="reader" style="position:static;max-height:none;max-width:980px">
+    <%= render "shared/document_reader", doc: @document, full_page: false,
+                                         similar_href: ->(id) { document_path(id, @query.present? ? { q: @query } : {}) } %>
+  </div>
+  <%= render "shared/pin_dialog", pitchbooks: @pitchbooks %>
+</section>

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title><%= deck.title.presence || "Pitch book" %></title>
+<style>
+<%= raw Exporters::Html.token_css %>
+<%= raw Exporters::Html::STYLE %>
+<%= raw Exporters::Html::STYLE_ADDITIONS %>
+</style>
+</head>
+<body>
+<main class="deck viz">
+<%= raw body %>
+</main>
+</body>
+</html>

@@ -1,0 +1,11 @@
+<%# One document as a card (documentCard in app.js). Locals: title, href,
+    ticker, doc_type, published_at, sentiment. %>
+<article class="result">
+  <div class="title"><%= link_to title, href %></div>
+  <div class="meta">
+    <% if ticker.present? %><span class="pill ticker"><%= ticker %></span><% end %>
+    <span class="pill"><%= doc_type %></span>
+    <span><%= iso(published_at) %></span>
+    <%= sentiment_pill(sentiment) %>
+  </div>
+</article>

@@ -1,0 +1,32 @@
+<%# Pin-to-deck dialog, driven by controllers/pin_dialog_controller.js. Render
+    it inside the element that carries data-controller="pin-dialog" so the pin
+    buttons (shared/_pin_button) and the dialog share one controller.
+    The form posts evidence[quote|document_id|chunk_id|note] to
+    /pitchbooks/:id/evidences (EvidencesController#create), which redirects
+    back here with its own flash, success or error.
+    Locals: pitchbooks — Pitchbook records, newest first. %>
+<dialog id="pin-dialog" data-pin-dialog-target="dialog" aria-labelledby="pin-dialog-title">
+  <% first = pitchbooks.first %>
+  <%= form_with url: (first ? pitchbook_evidences_path(first) : "#"), method: :post, local: true,
+                data: { pin_dialog_target: "form", action: "submit->pin-dialog#submit" } do %>
+    <h2 id="pin-dialog-title">Pin to a pitch book</h2>
+    <blockquote class="quote" data-pin-dialog-target="quote"></blockquote>
+    <%= hidden_field_tag "evidence[quote]", "", id: nil, data: { pin_dialog_target: "quoteField" } %>
+    <%= hidden_field_tag "evidence[document_id]", "", id: nil, data: { pin_dialog_target: "documentField" } %>
+    <%= hidden_field_tag "evidence[chunk_id]", "", id: nil, data: { pin_dialog_target: "chunkField" } %>
+    <label>Pitch book
+      <select data-pin-dialog-target="book" data-action="change->pin-dialog#retarget" aria-label="Pitch book">
+        <% pitchbooks.each do |book| %>
+          <option value="<%= book.id %>" data-url="<%= pitchbook_evidences_path(book) %>"><%= book.title %> (<%= book.target_company&.ticker || "—" %>)</option>
+        <% end %>
+      </select>
+    </label>
+    <label>Note (optional)
+      <%= text_field_tag "evidence[note]", "", id: nil, placeholder: "Why this matters", data: { pin_dialog_target: "note" } %>
+    </label>
+    <div class="dialog-actions">
+      <button class="ghost" type="button" data-action="pin-dialog#close">Cancel</button>
+      <button class="primary" type="submit" data-pin-dialog-target="confirm">Pin evidence</button>
+    </div>
+  <% end %>
+</dialog>

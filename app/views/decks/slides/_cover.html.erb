@@ -1,0 +1,8 @@
+<% f = Pitchbooks::Slides::Format %>
+<div><span class="badge">Confidential — discussion materials</span></div>
+<% if payload[:client_name].present? %><p class="meta">Prepared for <%= payload[:client_name] %></p><% end %>
+<p class="meta"><%= [payload[:target], payload[:ticker], payload[:banker], payload[:date]].compact_blank.join(" · ") %></p>
+<% stamp = payload[:stamp] %>
+<% if stamp.present? %>
+<p class="stamp" data-stamp>Data as of <%= f.date(stamp[:data_as_of]) %> · prices as of <%= f.date(stamp[:price_date]) %> · built <%= f.date(stamp[:built_on].presence || stamp[:built_at]) %> · code <%= stamp[:code_version].presence || "unknown" %></p>
+<% end %>

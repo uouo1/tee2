@@ -1,0 +1,12 @@
+<%# One slide: counter, heading, subtitle, then the kind's own partial. Unknown
+    kinds degrade to bullets or raw text (the reference's fallback). %>
+<% kind = slide.kind.to_s %>
+<% cover = kind == "cover" %>
+<% payload = (slide.payload_hash || {}).to_h.deep_symbolize_keys %>
+<% known = Pitchbooks::SLIDE_ORDER.map(&:first).include?(kind) %>
+<section class="slide<%= ' cover' if cover %>" data-kind="<%= kind %>"<% if slide.respond_to?(:id) && slide.id %> id="slide-<%= slide.id %>"<% end %>>
+<% unless cover %><div class="slide-no"><%= index %> / <%= total %></div><% end %>
+<%= content_tag(cover ? :h1 : :h2, slide.title.to_s) %>
+<% if slide.subtitle.present? %><p class="sub"><%= slide.subtitle %></p><% end %>
+<%= render(known ? "decks/slides/#{kind}" : "decks/slides/fallback", payload: payload, slide: slide) %>
+</section>

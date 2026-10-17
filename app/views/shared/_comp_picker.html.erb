@@ -1,0 +1,20 @@
+<%# Comparable-company chips for a new-deck form, driven by
+    controllers/comp_picker_controller.js. Each chip pairs with a hidden
+    comp_tickers[] input that is enabled only while the chip is pressed.
+    Locals: companies — [[ticker, name], ...]; target — the target ticker
+    (its own chip is hidden); selected — tickers pressed initially;
+    target_select — optional CSS selector of the target <select>, so changing
+    the target re-suggests comps. %>
+<% selected = Array(local_assigns[:selected]).map(&:to_s) %>
+<% target = local_assigns[:target].to_s %>
+<div class="comp-picker" data-controller="comp-picker"
+     <% if local_assigns[:target_select].present? %>data-comp-picker-target-select-value="<%= target_select %>"<% end %>>
+  <% companies.each do |ticker, name| %>
+    <% pressed = selected.include?(ticker) && ticker != target %>
+    <button class="chip" type="button" title="<%= name %>" aria-pressed="<%= pressed %>"
+            data-comp-picker-target="chip" data-ticker="<%= ticker %>" data-action="comp-picker#toggle"
+            <%= "hidden" if ticker == target %>><%= ticker %></button>
+    <input type="hidden" name="comp_tickers[]" value="<%= ticker %>" data-comp-picker-target="input"
+           <%= "disabled" unless pressed %>>
+  <% end %>
+</div>

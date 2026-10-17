@@ -1,0 +1,14 @@
+<% f = Pitchbooks::Slides::Format %>
+<% currency = payload[:currency].presence || "USD" %>
+<div class="table-scroll">
+<%= raw Charts.table_html(
+      [
+        { key: :name, label: "Counterparty" },
+        { key: :type, label: "Type" },
+        { key: :enterprise_value, label: "EV (#{currency}m)", numeric: true, format: f::INT },
+        { key: :relative_size, label: "EV vs target", numeric: true, format: f::MULT2 },
+        { key: :rationale, label: "Rationale" }
+      ],
+      Array(payload[:candidates])
+    ) %>
+</div>

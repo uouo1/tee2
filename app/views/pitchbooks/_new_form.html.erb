@@ -1,0 +1,37 @@
+<%# New-deck form. The comp chips are checkboxes, so the form works without
+    JavaScript; "Suggest comparables" re-renders the page (GET) with the
+    suggestions for the chosen target ticked. The comp-picker Stimulus
+    controller may enhance this in place. %>
+<%= form_with url: pitchbooks_path, method: :post, scope: :pitchbook, class: "newbook panel", id: "book-form",
+              data: { controller: "comp-picker" } do |form| %>
+  <h2>New pitch book</h2>
+  <% if @error.present? %><p class="hint" role="alert" style="color: var(--critical)"><%= @error %></p><% end %>
+  <label>Target company
+    <%= form.select :target_ticker, @companies.map { |c| ["#{c.ticker} — #{c.name}", c.ticker] },
+                    { selected: @target }, required: true, id: "book-target", data: { comp_picker_target: "target" } %>
+  </label>
+  <label>Deck title
+    <%= form.text_field :title, value: @form[:title], placeholder: "Project Lighthouse", id: "book-title" %>
+  </label>
+  <label>Client
+    <%= form.text_field :client_name, value: @form[:client_name], placeholder: "Board of directors", id: "book-client" %>
+  </label>
+  <label>Adviser
+    <%= form.text_field :banker, value: @form[:banker], placeholder: "Argos Advisory", id: "book-banker" %>
+  </label>
+  <fieldset>
+    <legend>Comparables</legend>
+    <div id="book-comps" class="comp-picker" data-comp-picker-target="chips">
+      <% @companies.reject { |c| c.ticker == @target }.each do |company| %>
+        <% checked = @checked.include?(company.ticker) %>
+        <label class="chip" aria-pressed="<%= checked %>">
+          <input type="checkbox" name="pitchbook[comp_tickers][]" value="<%= company.ticker %>"<%= " checked" if checked %> data-action="comp-picker#toggle">
+          <%= company.ticker %>
+        </label>
+      <% end %>
+    </div>
+    <p class="hint">Ticked: same sector, closest in revenue to <%= @target || "the target" %>. Leave all unticked to use the suggested set.</p>
+    <button class="ghost" type="submit" formaction="<%= pitchbooks_path %>" formmethod="get" formnovalidate>Suggest comparables for this target</button>
+  </fieldset>
+  <button class="primary" type="submit">Generate deck</button>
+<% end %>

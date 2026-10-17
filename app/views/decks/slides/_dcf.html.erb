@@ -1,0 +1,83 @@
+<% f = Pitchbooks::Slides::Format %>
+<% currency = payload[:currency].presence || "USD" %>
+<% projections = Array(payload[:projections]) %>
+<% terminal = payload[:terminal_year] || {} %>
+<% a = payload[:assumptions] || {} %>
+<% build = payload[:wacc_build] || {} %>
+<% charted = projections.reject { |p| p[:fcf].nil? } %>
+<%= raw Charts.column_chart_svg(charted.map { |p| p[:year].to_s }, charted.map { |p| p[:fcf].to_f }, title: "Unlevered free cash flow counted (#{currency}m)", value_format: f::INT) %>
+<div class="grid kpis" style="margin-top:14px">
+  <div class="kpi"><div class="label">PV of forecast FCF</div><div class="value"><%= f.money(payload[:pv_explicit], currency) %></div></div>
+  <div class="kpi"><div class="label">PV of terminal value</div><div class="value"><%= f.money(payload[:pv_terminal], currency) %></div></div>
+  <div class="kpi"><div class="label">Enterprise value</div><div class="value"><%= f.money(payload[:enterprise_value], currency) %></div></div>
+  <div class="kpi"><div class="label">Equity value</div><div class="value"><%= f.money(payload[:equity_value], currency) %></div></div>
+  <div class="kpi"><div class="label">Value per share</div><div class="value"><%= f.price(payload[:value_per_share], currency) %></div></div>
+  <div class="kpi"><div class="label">Implied exit multiple</div><div class="value"><%= f.mult(payload[:implied_exit_multiple]) %></div></div>
+  <div class="kpi"><div class="label">Implied terminal growth</div><div class="value"><%= f.pct(payload[:implied_terminal_growth]) %></div></div>
+  <div class="kpi"><div class="label">Stub fraction · valuation date</div><div class="value"><%= payload[:stub_fraction].nil? ? "n/a" : Charts.fixed(payload[:stub_fraction], decimals: 2) %> · <%= f.date(payload[:valuation_date]) %></div></div>
+</div>
+<% if payload[:note].present? %><p class="note"><%= payload[:note] %></p><% end %>
+<% Array(payload[:notes]).each do |line| %><p class="footnote"><%= line %></p><% end %>
+<p class="note pills">
+<% [
+     ["WACC", f.pct(a[:wacc], 2)],
+     ["Terminal growth", f.pct(a[:terminal_growth], 2)],
+     ["Exit multiple", a[:exit_multiple].nil? ? "none (Gordon growth)" : f.mult(a[:exit_multiple])],
+     ["Base revenue", f.money(a[:base_revenue], currency)],
+     ["Revenue growth (yr 1)", f.pct(a[:revenue_growth])],
+     ["EBITDA margin", f.pct(a[:ebitda_margin])],
+     ["D&A % revenue", f.pct(a[:da_pct_revenue])],
+     ["Capex % revenue", f.pct(a[:capex_pct_revenue])],
+     ["NWC % of revenue change", f.pct(a[:nwc_pct_revenue])],
+     ["Tax rate", f.pct(a[:tax_rate])],
+     ["Net debt", a[:net_debt].nil? ? "not loaded" : f.money(a[:net_debt], currency)]
+   ].each do |label, value| %><span class="pill"><%= label %>: <%= value %></span><% end %>
+</p>
+<% if build.present? %>
+<div class="table-scroll" style="margin-top:12px">
+<table class="data-table wacc-build">
+<caption class="viz-caption">WACC build</caption>
+<thead><tr><th scope="col">Input</th><th scope="col" class="num">Value</th></tr></thead>
+<tbody>
+<tr><td>Risk-free rate</td><td class="num"><%= f.pct(build[:risk_free_rate], 2) %></td></tr>
+<tr><td>Beta<%= " (assumed — not loaded)" if build[:beta_assumed] %></td><td class="num"><%= build[:beta].nil? ? "n/a" : Charts.fixed(build[:beta], decimals: 2) %></td></tr>
+<tr><td>Equity risk premium</td><td class="num"><%= f.pct(build[:equity_risk_premium], 2) %></td></tr>
+<tr><td>Cost of equity</td><td class="num"><%= f.pct(build[:cost_of_equity], 2) %></td></tr>
+<tr><td>Pre-tax cost of debt</td><td class="num"><%= f.pct(build[:pre_tax_cost_of_debt], 2) %></td></tr>
+<tr><td>Tax rate</td><td class="num"><%= f.pct(build[:tax_rate], 1) %></td></tr>
+<tr><td>After-tax cost of debt</td><td class="num"><%= f.pct(build[:after_tax_cost_of_debt], 2) %></td></tr>
+<tr><td>Debt / equity weights</td><td class="num"><%= f.pct(build[:weight_debt]) %> / <%= f.pct(build[:weight_equity]) %></td></tr>
+<tr><td><strong>WACC (built)</strong></td><td class="num"><strong><%= f.pct(build[:wacc], 2) %></strong></td></tr>
+</tbody>
+</table>
+</div>
+<% Array(build[:notes]).each do |line| %><p class="footnote"><%= line %></p><% end %>
+<% end %>
+<% cell = ->(value, fmt) { value.nil? ? "—" : fmt.call(value) } %>
+<div class="table-scroll" style="margin-top:12px">
+<table class="data-table dcf-projections">
+<caption class="viz-caption"><%= currency %>m; UFCF = EBIT − taxes + D&amp;A − capex − ΔNWC; the first year counts its stub fraction</caption>
+<thead><tr>
+<th scope="col">Year</th><th scope="col" class="num">Revenue</th><th scope="col" class="num">Growth</th><th scope="col" class="num">EBITDA</th><th scope="col" class="num">Margin</th>
+<th scope="col" class="num">D&amp;A</th><th scope="col" class="num">EBIT</th><th scope="col" class="num">Taxes</th><th scope="col" class="num">Capex</th><th scope="col" class="num">ΔNWC</th>
+<th scope="col" class="num">UFCF (year)</th><th scope="col" class="num">Fraction</th><th scope="col" class="num">UFCF counted</th><th scope="col" class="num">Period</th><th scope="col" class="num">DF</th><th scope="col" class="num">PV</th>
+</tr></thead>
+<tbody>
+<% projections.each do |p| %>
+<tr>
+<td><%= p[:year] %></td><td class="num"><%= cell.(p[:revenue], f::INT) %></td><td class="num"><%= cell.(p[:growth], f::PCT1) %></td><td class="num"><%= cell.(p[:ebitda], f::INT) %></td><td class="num"><%= cell.(p[:ebitda_margin], f::PCT1) %></td>
+<td class="num"><%= cell.(p[:dep_amort], f::INT) %></td><td class="num"><%= cell.(p[:ebit], f::INT) %></td><td class="num"><%= cell.(p[:taxes], f::INT) %></td><td class="num"><%= cell.(p[:capex], f::INT) %></td><td class="num"><%= cell.(p[:nwc_change], f::INT) %></td>
+<td class="num"><%= cell.(p[:fcf_full_year], f::INT) %></td><td class="num"><%= cell.(p[:period_fraction], f::DEC2) %></td><td class="num"><%= cell.(p[:fcf], f::INT) %></td><td class="num"><%= cell.(p[:discount_period], f::DEC2) %></td><td class="num"><%= cell.(p[:discount_factor], f::DEC3) %></td><td class="num"><%= cell.(p[:pv_fcf], f::INT) %></td>
+</tr>
+<% end %>
+<% if terminal.present? %>
+<tr class="is-terminal" data-row="terminal">
+<td>Terminal (<%= terminal[:year] %>)</td><td class="num"><%= cell.(terminal[:revenue], f::INT) %></td><td class="num"><%= cell.(terminal[:growth], f::PCT1) %></td><td class="num"><%= cell.(terminal[:ebitda], f::INT) %></td><td class="num"><%= cell.(terminal[:ebitda_margin], f::PCT1) %></td>
+<td class="num"><%= cell.(terminal[:dep_amort], f::INT) %></td><td class="num"><%= cell.(terminal[:ebit], f::INT) %></td><td class="num"><%= cell.(terminal[:taxes], f::INT) %></td><td class="num"><%= cell.(terminal[:capex], f::INT) %><%= "*" if terminal[:capex_floored_at_da] %></td><td class="num"><%= cell.(terminal[:nwc_change], f::INT) %></td>
+<td class="num"><%= cell.(terminal[:fcf], f::INT) %></td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num"><%= cell.(payload[:pv_terminal], f::INT) %></td>
+</tr>
+<% end %>
+</tbody>
+</table>
+</div>
+<p class="footnote">Terminal value <%= f.money(payload[:terminal_value], currency) %> (<%= payload[:terminal_method] %>), present value in the last column.<% if terminal[:capex_floored_at_da] %> *Terminal capex floored at D&amp;A.<% end %><% if payload[:bridge_note].present? %> <%= payload[:bridge_note] %><% end %></p>

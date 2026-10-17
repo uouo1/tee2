@@ -1,0 +1,9 @@
+<% f = Pitchbooks::Slides::Format %>
+<% items = Array(payload[:items]) %>
+<% if items.empty? %>
+<p class="note">No evidence pinned yet. Pin passages from the research module to build this appendix.</p>
+<% else %>
+<% items.each do |item| %>
+<blockquote class="quote">“<%= item[:quote] %>”<span class="src"><%= [item[:ticker], item[:title], item[:doc_type], (item[:published_at].present? ? f.date(item[:published_at]) : nil)].compact_blank.join(" · ") %><% if item[:document_id].present? %> [doc <%= item[:document_id] %>]<% end %><% if item[:note].present? %><br>Note: <%= item[:note] %><% end %></span></blockquote>
+<% end %>
+<% end %>

@@ -1,0 +1,11 @@
+<% f = Pitchbooks::Slides::Format %>
+<% currency = payload[:currency].presence || "USD" %>
+<%= raw Charts.heatmap_html(
+      Array(payload[:grid]),
+      row_labels: Array(payload[:terminal_axis]).map { |g| "#{Charts.fixed(g.to_f * 100, decimals: 2)}%" },
+      column_labels: Array(payload[:wacc_axis]).map { |w| "#{Charts.fixed(w.to_f * 100, decimals: 2)}%" },
+      row_title: "Terminal growth",
+      column_title: "WACC",
+      reference: payload[:reference_price]
+    ) %>
+<p class="note">Value per share (<%= currency %>).<% unless payload[:reference_price].nil? %> The outlined cells sit within 2% of the current share price of <%= f.price(payload[:reference_price], currency) %>.<% end %><% if payload[:bridge_note].present? %> <%= payload[:bridge_note] %><% end %></p>

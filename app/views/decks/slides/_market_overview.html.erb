@@ -1,0 +1,24 @@
+<% f = Pitchbooks::Slides::Format %>
+<% timeline = Array(payload[:sentiment_timeline]) %>
+<% volume = payload[:volume_by_type] || {} %>
+<p><%= payload[:narrative] %></p>
+<div class="grid two" style="margin-top:14px">
+<% if timeline.any? %>
+<%= raw Charts.diverging_bar_svg(timeline.map { |row| row[:month].to_s[-5..] || row[:month].to_s }, timeline.map { |row| row[:sentiment].to_f }, title: "Mean document tone by month (−1 to +1)") %>
+<% end %>
+<% if Array(volume[:months]).any? %>
+<%= raw Charts.stacked_bar_svg(volume[:months].map { |m| m.to_s[-5..] || m.to_s }, Array(volume[:series]), title: "Documents published by type") %>
+<% end %>
+</div>
+<div style="margin-top:18px">
+<%= raw Charts.table_html(
+      [
+        { key: :theme, label: "Theme" },
+        { key: :mentions, label: "Documents (recent)", numeric: true },
+        { key: :prior_mentions, label: "Prior period", numeric: true },
+        { key: :lift, label: "Lift", numeric: true, format: f::MULT2 }
+      ],
+      Array(payload[:themes]).first(8),
+      caption: "Themes over-represented versus the preceding comparable period"
+    ) %>
+</div>

@@ -1,0 +1,141 @@
+<% content_for(:title, "#{@pitchbook.title} · Argos") %>
+<% f = Pitchbooks::Slides::Format %>
+<% target = @pitchbook.target_company %>
+<% stamp = @slides.find { |s| s.kind == "cover" }&.payload_hash&.dig(:stamp) || {} %>
+<div class="view-head">
+  <p class="small"><%= link_to "← All pitch books", pitchbooks_path %></p>
+  <h1><%= @pitchbook.title %></h1>
+  <% if @pitchbook.subtitle.present? %><p class="muted"><%= @pitchbook.subtitle %></p><% end %>
+</div>
+
+<% if @warnings.any? %>
+  <div class="panel stale-warning" role="status" style="border-color: var(--warning)">
+    <strong>The data has changed since these slides were built.</strong>
+    <ul>
+      <% @warnings.each do |warning| %><li><%= warning %></li><% end %>
+    </ul>
+    <%= button_to "Rebuild now", rebuild_pitchbook_path(@pitchbook), class: "primary" %>
+  </div>
+<% end %>
+
+<div class="panel">
+  <div class="book-toolbar">
+    <strong><%= @pitchbook.title %></strong>
+    <span class="pill ticker"><%= target&.ticker || "—" %></span>
+    <span class="muted small"><%= @slides.size %> slides · <%= @evidence.size %> pinned items · comps <%= @comps.join(", ").presence || "none" %></span>
+    <span class="spacer"></span>
+    <% @formats.each do |fmt| %>
+      <%= link_to "Export #{fmt.upcase}", export_pitchbook_path(@pitchbook, format: fmt), class: "ghost", data: { turbo: false } %>
+    <% end %>
+    <%= button_to "Rebuild", rebuild_pitchbook_path(@pitchbook), class: "ghost" %>
+    <%= button_to "Delete", pitchbook_path(@pitchbook), method: :delete, class: "ghost",
+                  form: { data: { turbo_confirm: "Delete “#{@pitchbook.title}”?" } } %>
+  </div>
+  <% if stamp.present? %>
+    <p class="stamp">Built <%= f.date(stamp[:built_on].presence || stamp[:built_at]) %> from data as of <%= f.date(stamp[:data_as_of]) %>, prices as of <%= f.date(stamp[:price_date]) %> · code <%= stamp[:code_version].presence || "unknown" %></p>
+  <% end %>
+
+  <details id="assumptions">
+    <summary class="small muted">DCF assumptions — edit and rebuild</summary>
+    <%= form_with url: assumptions_pitchbook_path(@pitchbook), method: :post, class: "assumptions", style: "margin-top:10px" do %>
+      <% [
+           ["wacc", "WACC (decimal)"],
+           ["terminal_growth", "Terminal growth"],
+           ["revenue_growth", "Revenue growth yr 1"],
+           ["ebitda_margin", "EBITDA margin"],
+           ["margin_expansion", "Margin change / yr"],
+           ["da_pct_revenue", "D&A % revenue"],
+           ["capex_pct_revenue", "Capex % revenue"],
+           ["nwc_pct_revenue", "NWC % of revenue change"],
+           ["tax_rate", "Tax rate"],
+           ["exit_multiple", "Exit multiple (optional)"],
+           ["years", "Projection years"]
+         ].each do |key, label| %>
+        <label><%= label %><% if @overrides.key?(key.to_sym) %> <span class="pill flag" title="Set on this deck">set</span><% end %>
+          <input type="number" step="any" name="assumptions[<%= key %>]" value="<%= @assumptions[key.to_sym] %>" data-assumption="<%= key %>">
+        </label>
+      <% end %>
+      <div><button class="primary" type="submit">Apply assumptions</button></div>
+    <% end %>
+    <p class="footnote">Rates are decimals (0.095 = 9.5%). Blank fields keep the current value; values set on this deck survive a rebuild.</p>
+  </details>
+
+  <details id="comps">
+    <summary class="small muted">Comparables — change the comp set and rebuild</summary>
+    <%= form_with url: comps_pitchbook_path(@pitchbook), method: :post, style: "margin-top:10px", data: { controller: "comp-picker" } do %>
+      <input type="hidden" name="tickers[]" value="">
+      <div class="comp-picker">
+        <% @companies.each do |company| %>
+          <% checked = @comps.include?(company.ticker) %>
+          <label class="chip" aria-pressed="<%= checked %>" title="<%= company.name %>">
+            <input type="checkbox" name="tickers[]" value="<%= company.ticker %>"<%= " checked" if checked %> data-action="comp-picker#toggle">
+            <%= company.ticker %>
+          </label>
+        <% end %>
+      </div>
+      <div style="margin-top:10px"><button class="primary" type="submit">Apply comparables</button></div>
+    <% end %>
+  </details>
+
+  <details id="slide-editor">
+    <summary class="small muted">Slides — edit titles (pins the slide), reorder</summary>
+    <div class="table-scroll" style="margin-top:10px">
+      <table class="data-table">
+        <thead><tr><th scope="col">#</th><th scope="col">Slide</th><th scope="col">Title and subtitle</th><th scope="col">Order</th></tr></thead>
+        <tbody>
+          <% @slides.each_with_index do |slide, index| %>
+            <tr id="edit-slide-<%= slide.id %>">
+              <td class="num"><%= index + 1 %></td>
+              <td><%= slide.kind.humanize %><% if slide.is_pinned %> <span class="pill flag" title="Kept as written on rebuild">pinned</span><% end %></td>
+              <td>
+                <%= form_with url: slide_path(slide), method: :patch, scope: :slide, class: "row" do |form| %>
+                  <%= form.text_field :title, value: slide.title, "aria-label": "Title of slide #{index + 1}", required: true %>
+                  <%= form.text_field :subtitle, value: slide.subtitle, "aria-label": "Subtitle of slide #{index + 1}", placeholder: "Subtitle" %>
+                  <button class="ghost" type="submit">Save &amp; pin</button>
+                <% end %>
+                <% if slide.is_pinned %>
+                  <%= button_to "Unpin", slide_path(slide), method: :patch, params: { "slide[pin]" => "0" }, class: "ghost" %>
+                <% end %>
+              </td>
+              <td class="actions-row">
+                <%= button_to "↑", reorder_pitchbook_path(@pitchbook), params: { slide_id: slide.id, direction: "up" },
+                              class: "ghost", disabled: index.zero?, "aria-label": "Move slide #{index + 1} up" %>
+                <%= button_to "↓", reorder_pitchbook_path(@pitchbook), params: { slide_id: slide.id, direction: "down" },
+                              class: "ghost", disabled: index == @slides.size - 1, "aria-label": "Move slide #{index + 1} down" %>
+              </td>
+            </tr>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+    <p class="footnote">A rebuild regenerates every unpinned slide and restores the standard order.</p>
+  </details>
+
+  <details id="evidence"<%= " open" if @evidence.any? %>>
+    <summary class="small muted">Evidence — <%= @evidence.size %> pinned item(s)</summary>
+    <% if @evidence.empty? %>
+      <p class="empty">No evidence pinned yet. Pin passages from the research pages, or add a note below.</p>
+    <% else %>
+      <% @evidence.each do |item| %>
+        <blockquote class="quote">“<%= item[:quote].to_s.truncate(400) %>”
+          <span class="src"><%= [item[:ticker], item[:title], item[:doc_type], (f.date(item[:published_at]) if item[:published_at].present?)].compact_blank.join(" · ").presence || "Note" %><% if item[:note].present? %> — <%= item[:note] %><% end %></span>
+          <%= button_to "Remove", evidence_path(item[:id]), method: :delete, class: "ghost", form: { data: { turbo_confirm: "Remove this item from the appendix?" } } %>
+        </blockquote>
+      <% end %>
+    <% end %>
+    <%= form_with url: pitchbook_evidences_path(@pitchbook), scope: :evidence, method: :post, style: "margin-top:10px" do |form| %>
+      <label>Note or quote
+        <%= form.text_area :quote, rows: 3, required: true, placeholder: "A point to carry into diligence" %>
+      </label>
+      <label>Why it matters (optional)
+        <%= form.text_field :note %>
+      </label>
+      <label>Attach to slide (optional)
+        <%= form.select :slide_id, [["None", ""]] + @slides.each_with_index.map { |s, i| ["#{i + 1}. #{s.title}", s.id] } %>
+      </label>
+      <div><button class="primary" type="submit">Add to appendix</button></div>
+    <% end %>
+  </details>
+</div>
+
+<div class="deck-preview" id="deck-preview"><%= raw @deck_html %></div>

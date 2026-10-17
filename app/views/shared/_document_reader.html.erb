@@ -1,0 +1,71 @@
+<%# The document reader (openDocument in app.js): metadata, extractive
+    summary, keywords, extracted metrics, every passage with a pin button, and
+    similar documents. Used beside research results and on documents#show.
+    Locals: doc — Search.get_document hash; similar_href — lambda(document_id)
+    giving the link for a similar document; full_page — show the "open on its
+    own page" link. Render inside a data-controller="pin-dialog" element. %>
+<div class="panel">
+  <h2><%= doc[:title] %></h2>
+  <div class="meta small muted">
+    <%= [doc[:ticker].presence, doc[:doc_type], iso(doc[:published_at]), doc[:source].presence,
+         "#{num(doc[:word_count])} words"].compact.join(" · ") %>
+  </div>
+  <div class="meta small" style="margin-top:6px">
+    <%= sentiment_pill(doc[:sentiment], doc[:sentiment_label]) %>
+    <% if doc[:url].present? %> · <%= link_to "Source", doc[:url], rel: "noopener noreferrer", target: "_blank" %><% end %>
+    <% if local_assigns[:full_page] %> · <%= link_to "Open on its own page", document_path(doc[:id]) %><% end %>
+  </div>
+  <p class="small" style="margin-top:8px"><%= Array(doc[:summary]).join(" ") %></p>
+  <% if doc[:keywords].present? %>
+    <div class="examples">
+      <% doc[:keywords].first(8).each do |keyword| %><span class="pill"><%= keyword[:theme] %></span><% end %>
+    </div>
+  <% end %>
+</div>
+
+<% if doc[:kpis].present? %>
+  <div class="panel">
+    <h2>Extracted metrics</h2>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th scope="col">Metric</th><th scope="col" class="num">Value</th><th scope="col">Period</th></tr></thead>
+        <tbody>
+          <% doc[:kpis].each do |kpi| %>
+            <tr>
+              <td><%= kpi[:metric].to_s.tr("_", " ") %></td>
+              <td class="num"><%= kpi_value(kpi[:value], kpi[:unit]) %></td>
+              <td><%= kpi[:period].presence || "n/a" %></td>
+            </tr>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+<% end %>
+
+<div class="panel">
+  <h2>Passages (<%= Array(doc[:chunks]).size %>)</h2>
+  <% Array(doc[:chunks]).each do |chunk| %>
+    <% score = chunk[:sentiment].to_f %>
+    <div class="passage <%= 'pos' if score >= 0.18 %><%= 'neg' if score <= -0.18 %>" id="passage-<%= chunk[:id] %>">
+      <% if chunk[:speaker].present? %><span class="speaker"><%= chunk[:speaker] %></span><% end %>
+      <span><%= chunk[:text] %></span>
+      <div class="pin">
+        <%= render "shared/pin_button", quote: chunk[:text], document_id: doc[:id], chunk_id: chunk[:id] %>
+      </div>
+    </div>
+  <% end %>
+</div>
+
+<% if doc[:similar].present? %>
+  <div class="panel">
+    <h2>Similar documents</h2>
+    <% doc[:similar].each do |row| %>
+      <%= link_to similar_href.call(row[:document_id]), class: "company-item" do %>
+        <span><%= row[:title] %></span>
+        <span class="sub"><%= [row[:ticker].presence || "—", row[:doc_type], iso(row[:published_at]),
+                               "similarity #{row[:similarity]}"].join(" · ") %></span>
+      <% end %>
+    <% end %>
+  </div>
+<% end %>

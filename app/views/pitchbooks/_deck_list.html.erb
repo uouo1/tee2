@@ -1,0 +1,12 @@
+<% if pitchbooks.empty? %>
+  <p class="empty">No decks yet. Generate one from a target company.</p>
+<% else %>
+  <div id="book-index">
+  <% pitchbooks.each do |book| %>
+    <%= link_to pitchbook_path(book[:id]), class: "book-item", aria: { current: (defined?(@pitchbook) && @pitchbook&.id == book[:id]) ? "page" : nil } do %>
+      <span><%= book[:title] %></span>
+      <span class="sub"><%= book[:ticker] || "—" %> · <%= book[:slide_count] %> slides · <%= book[:evidence_count] %> evidence · <%= book[:updated_at]&.to_date&.iso8601 || "n/a" %></span>
+    <% end %>
+  <% end %>
+  </div>
+<% end %>

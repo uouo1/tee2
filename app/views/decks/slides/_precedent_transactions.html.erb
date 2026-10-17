@@ -1,0 +1,17 @@
+<% f = Pitchbooks::Slides::Format %>
+<div class="table-scroll">
+<%= raw Charts.table_html(
+      [
+        { key: :announced_on, label: "Announced", format: ->(v) { f.date(v) } },
+        { key: :target, label: "Target" },
+        { key: :acquirer, label: "Acquirer" },
+        { key: :ev, label: "EV (USDm)", numeric: true, format: f::INT },
+        { key: :ev_revenue, label: "EV/Rev", numeric: true, format: f::MULT1 },
+        { key: :ev_ebitda, label: "EV/EBITDA", numeric: true, format: f::MULT1 },
+        { key: :premium_1day, label: "1-day premium", numeric: true, format: f::PCT0 },
+        { key: :consideration, label: "Consideration" }
+      ],
+      Array(payload[:rows])
+    ) %>
+</div>
+<% if payload[:note].present? %><p class="note"><%= payload[:note] %></p><% end %>

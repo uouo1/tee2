@@ -1,0 +1,10 @@
+<% f = Pitchbooks::Slides::Format %>
+<% currency = payload[:currency].presence || "USD" %>
+<% reference = payload[:reference_range] || {} %>
+<div class="grid kpis">
+  <div class="kpi"><div class="label">Implied value (peer multiples and DCF)</div><div class="value"><% if reference[:low].nil? || reference[:high].nil? %>Not bridged<% else %><%= f.price(reference[:low], currency) %> – <%= f.price(reference[:high], currency) %><% end %></div></div>
+  <div class="kpi"><div class="label">Current price</div><div class="value"><%= f.price(payload[:share_price], currency) %></div></div>
+  <div class="kpi"><div class="label">EBITDA margin (<%= payload[:basis_label] %>)</div><div class="value"><%= f.pct(payload[:target_margin]) %></div></div>
+  <div class="kpi"><div class="label">Peer median margin</div><div class="value"><%= f.pct(payload[:peer_median_margin]) %></div></div>
+</div>
+<div style="margin-top:16px"><%= render "decks/slides/bullets", bullets: payload[:bullets] %></div>
