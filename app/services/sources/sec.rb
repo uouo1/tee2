@@ -138,10 +138,15 @@ module Sources
     # once per company ("first tag with any data") lost every year after a tag
     # switch and, for Xylem, dropped the whole current-debt line (an audit
     # finding). Within a tag the most recently filed value wins: restatements.
-    def duration_entries(facts, names, unit: "USD")
+    # A preferred tag carrying less than this share of another tag's value for
+    # the same year is a sub-line, not the total (Charter tags one revenue
+    # stream under RevenueFromContractWithCustomerIncludingAssessedTax, 889m,
+    # while Revenues holds the 55bn total). Only the revenue concept uses it.
+    SUB_LINE_RATIO = 0.2
+
+    def duration_entries(facts, names, unit: "USD", sub_line_guard: false)
       us_gaap = facts.dig(:facts, :"us-gaap") || {}
-      out = {}
-      names.each do |name|
+      by_tag = names.map do |name|
         per_tag = {}
         (us_gaap.dig(name.to_sym, :units, unit.to_sym) || []).each do |entry|
           next unless ANNUAL_FORMS.include?(entry[:form]) && entry[:fp] == "FY"
@@ -158,7 +163,16 @@ module Sources
             per_tag[year] = { value: entry[:val].to_f, period_end: Date.iso8601(finish), filed: filed, tag: name }
           end
         end
-        per_tag.each { |year, row| out[year] ||= row }
+        per_tag
+      end
+      out = {}
+      by_tag.each { |per_tag| per_tag.each { |year, row| out[year] ||= row } }
+      return out unless sub_line_guard
+
+      out.each do |year, row|
+        candidates = by_tag.filter_map { |per_tag| per_tag[year] }
+        largest = candidates.max_by { |c| c[:value].abs }
+        out[year] = largest if largest && row[:value].abs < largest[:value].abs * SUB_LINE_RATIO
       end
       out
     end
@@ -312,7 +326,7 @@ module Sources
     # Amounts are converted to millions to match the rest of the application.
     def build_financials(facts, years: 6)
       entries = TAGS.each_with_object({}) do |(key, names), out|
-        out[key] = duration_entries(facts, names) unless key == :eps
+        out[key] = duration_entries(facts, names, sub_line_guard: key == :revenue) unless key == :eps
       end
       series = entries.transform_values { |rows| rows.transform_values { |row| row[:value] } }
       if series[:dep_amort].empty?
@@ -361,8 +375,12 @@ module Sources
           tax_rate: tax_rate ? py_round(tax_rate, 4) : nil
         }
       end
-      ltm = rows.empty? ? nil : ltm_row(facts, rows.last)
-      rows << ltm if ltm
+      unless rows.empty?
+        last_year = rows.last[:fiscal_year]
+        fy_tags = entries.to_h { |key, by_year| [key, by_year.dig(last_year, :tag)] }.compact
+        ltm = ltm_row(facts, rows.last, fy_tags: fy_tags)
+        rows << ltm if ltm
+      end
       rows
     end
 
@@ -377,17 +395,20 @@ module Sources
     # it, since it barely moves within a year. Working capital is not rolled.
     # Returns nil when no 10-Q extends the last fiscal year or the prior-year
     # comparable is missing.
-    def ltm_row(facts, fy_row)
+    def ltm_row(facts, fy_row, fy_tags: {})
       fy_end = fy_row[:period_end]
-      revenue = latest_ytd(facts, TAGS[:revenue], after: fy_end)
+      # The year-to-date figure must come from the tag the fiscal-year figure
+      # came from, or FY + YTD − prior YTD mixes two definitions of the line.
+      tags_for = ->(key) { ([fy_tags[key]] + TAGS[key]).compact.uniq }
+      revenue = latest_ytd(facts, tags_for.call(:revenue), after: fy_end)
       return nil if revenue.nil? || revenue[:prior_value].nil?
 
       quarter_end = revenue[:period_end]
       ytd = { revenue: revenue }
       %i[operating_income dep_amort net_income capex].each do |key|
-        ytd[key] = latest_ytd(facts, TAGS[key], after: fy_end, period_end: quarter_end)
+        ytd[key] = latest_ytd(facts, tags_for.call(key), after: fy_end, period_end: quarter_end)
       end
-      ytd[:eps] = latest_ytd(facts, TAGS[:eps], unit: "USD/shares", after: fy_end, period_end: quarter_end)
+      ytd[:eps] = latest_ytd(facts, tags_for.call(:eps), unit: "USD/shares", after: fy_end, period_end: quarter_end)
 
       roll = lambda do |key, fy_value, scale|
         y = ytd[key]

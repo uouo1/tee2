@@ -388,6 +388,31 @@ class SourcesTest < ActiveSupport::TestCase
     assert_equal Date.new(2025, 12, 31), rows[-2][:period_end]
   end
 
+  test "a sub-line under the preferred revenue tag yields to the total under a later tag, in the FY row and the LTM" do
+    # Charter: 889m of one revenue stream sits under the preferred contract-revenue tag, the 55bn total under Revenues.
+    facts = facts_fixture
+    gaap(facts)[:RevenueFromContractWithCustomerExcludingAssessedTax] = { units: { USD: [
+      fact(889e6, "2025-01-01", "2025-12-31"),
+      fact(220e6, "2026-01-01", "2026-06-30", form: "10-Q", fp: "Q2", filed: "2026-08-01"),
+      fact(210e6, "2025-01-01", "2025-06-30", form: "10-Q", fp: "Q2", filed: "2026-08-01")
+    ] } }
+    gaap(facts)[:Revenues] = { units: { USD: [
+      fact(55_000e6, "2025-01-01", "2025-12-31"),
+      fact(2_000e6, "2024-01-01", "2024-12-31", filed: "2025-02-20"),
+      fact(27_123e6, "2026-01-01", "2026-06-30", form: "10-Q", fp: "Q2", filed: "2026-08-01"),
+      fact(27_501e6, "2025-01-01", "2025-06-30", form: "10-Q", fp: "Q2", filed: "2026-08-01")
+    ] } }
+    rows = Sources::Sec.build_financials(facts)
+    fy = rows.find { |r| r[:fiscal_year] == 2025 && r[:period_type] == "FY" }
+    assert_equal 55_000.0, fy[:revenue], "the 889m line is a fifth of the total or less, so it is a sub-line"
+    ltm = rows.find { |r| r[:period_type] == "LTM" }
+    assert_equal 55_000.0 + 27_123.0 - 27_501.0, ltm[:revenue], "the year-to-date figures come from the tag the fiscal year used"
+    entries = Sources::Sec.duration_entries(facts, Sources::Sec::TAGS[:revenue], sub_line_guard: true)
+    assert_equal "Revenues", entries[2025][:tag]
+    assert_equal "RevenueFromContractWithCustomerExcludingAssessedTax",
+                 Sources::Sec.duration_entries(facts, Sources::Sec::TAGS[:revenue])[2025][:tag], "without the guard the preferred tag wins"
+  end
+
   test "no trailing row without a 10-Q beyond the fiscal year or without the prior-year comparable" do
     assert_equal %w[FY FY], Sources::Sec.build_financials(facts_fixture).map { |r| r[:period_type] }
     facts = facts_fixture
