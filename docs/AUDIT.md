@@ -40,8 +40,8 @@ Severity: critical = a wrong number in a published result or a security problem;
 | Sev. | Where | Finding | Action |
 |---|---|---|---|
 | blocker | `argos/sources/sec.py:430`, `app/services/sources/sec.rb` | Net debt read from the last fiscal year end ($228m, Dec-2025) while the price is from Oct-2026; the Jun-2026 10-Q in the corpus shows cash 745.2 and debt 1,575.2 (net debt ≈ $830m) plus $21.9m NCI. EV/EBITDA 11.0x should be ≈ 12.7x, DCF base $89 → ≈ $75. | Fixed in Rails: `Sources::Sec.latest_balance_sheet` reads the newest 10-K or 10-Q at one date, stores `net_debt_as_of`, `balance_sheet_form`, `minority_interest`, `preferred_equity`; `Valuation` bridges EV through net debt plus other claims and reports the dates. Python unchanged. |
-| blocker | `argos/valuation.py:75`, `sec.py` | No LTM or NTM multiples; every multiple is on the last fiscal year, nine months stale for Itron. | Fixed in Rails for LTM: `build_financials` adds a `period_type: "LTM"` row (FY + YTD − prior YTD from the latest 10-Q; D&A falls back to the FY figure); `Valuation` quotes on it when present and labels the basis. NTM needs a consensus or guidance input and is not built. |
-| high | `argos/valuation.py:550` | WACC is a constant (9.5% + 2pts per unit of beta, beta never loaded); 73% of DCF value is terminal. | Fixed in Rails: `Valuation.wacc_build` (CAPM cost of equity, risk-free + spread for debt, market weights, after-tax), echoed with notes ("beta not loaded" when assumed). Inputs are house defaults, stated as such. |
+| blocker | `argos/valuation.py:75`, `sec.py` | No LTM or NTM multiples; every multiple is on the last fiscal year, nine months stale for Itron. | Fixed in Rails. LTM: `build_financials` adds a `period_type: "LTM"` row (FY + YTD − prior YTD from the latest 10-Q; D&A falls back to the FY figure); `Valuation` quotes on it when present and labels the basis. NTM: `Sources::Market.fetch_estimates` reads consensus revenue and EPS for the current and next fiscal year (plus beta) from the public quote summary, the loader stores them as estimate rows, `Valuation.ntm_metrics` calendarises them to the price date, and an NTM EV/EBITDA bar leads the football field; NTM EBITDA is derived from consensus revenue at the current margin and flagged, since no public source publishes consensus EBITDA. |
+| high | `argos/valuation.py:550` | WACC is a constant (9.5% + 2pts per unit of beta, beta never loaded); 73% of DCF value is terminal. | Fixed in Rails: `Valuation.wacc_build` (CAPM cost of equity, risk-free + spread for debt, market weights, after-tax), echoed with notes ("beta not loaded" when assumed). Beta is now loaded with the consensus estimates (Itron 1.32). Risk-free rate, premium and spread remain house defaults, stated as such. |
 | high | `argos/valuation.py:297` (`valuation.rb:229`) | ΔNWC charged as intensity × revenue level, so flat revenue tied up $42m a year for Itron. | Fixed: ΔNWC = intensity × change in revenue; zero at zero growth; terminal year on terminal growth. |
 | high | `argos/valuation.py:470-508` | The 52-week trading range was averaged into the concluded range as if it were a methodology; EV/Revenue given full weight for a margin outlier. | Fixed: the 52-week bar is `reference: true` and never in the conclusion; an EV/Revenue bar on a target whose margin lies outside the peer interquartile range is shown with a note and excluded. The conclusion lists the methods it rests on and is nil when none remain. |
 | high | `argos/valuation.py:546-554` | No valuation date: a full first projected year discounted from a fiscal year end while the price is nine months later. | Fixed: `stub_fraction` from the price date to the first projected year end; year 1 counts only its remainder; every flow and the terminal value are discounted from the valuation date. |
@@ -52,7 +52,7 @@ Severity: critical = a wrong number in a published result or a security problem;
 | medium | `argos/sources/sec.py:149-166` | Tags resolved once per company ("first tag with any data"): Xylem lost its current-debt line, Badger Meter had no net debt at all. | Fixed in Rails: `duration_entries` / `instant_entries` resolve per year and per date in preference order; `debt_total`, `MinorityInterest` and `PreferredStockValue` tags added; a filer with no debt line is bridged at zero debt with `debt_note` set. |
 | high (confirmed by skeptic) | `app/services/sources/sec.rb:187-193` | The Rails diluted share count took the newest weighted-diluted fact with no recency or scale check: LyondellBasell FY2011's 572m, McDonald's "716 shares", 29 of 523 filers off by more than 2×. | Fixed: used only when from the latest fiscal year and within 0.5–2× of the cover count; otherwise the cover page, with `basis` and `fallback_reason` returned. |
 
-Not fixed, by design or scope: adjusted EBITDA normalisation across peers (SBC, restructuring), a treasury-stock-method diluted count with convertible tests, pension and lease policy, NTM multiples from consensus, LBO and premiums-paid pages, analyst targets, named strategic and sponsor buyer screens. These are listed for the pitch-book port as items 16–22 of `docs/RAILS_PORT.md` or as product work below.
+Not fixed, by design or scope: adjusted EBITDA normalisation across peers (SBC, restructuring), a treasury-stock-method diluted count with convertible tests, pension and lease policy, consensus EBITDA (derived, not published), LBO and premiums-paid pages, analyst targets, named strategic and sponsor buyer screens. These are listed for the pitch-book port as items 16–22 of `docs/RAILS_PORT.md` or as product work below.
 
 ### Backtest (auditor findings, reproduced by the author)
 
@@ -129,7 +129,7 @@ Each error below is in the Python build; the Rails treatment is what the code no
 | EV = market cap + (debt − cash) from the last FY | EV = market cap + latest-balance-sheet net debt + NCI + preferred, dated; unknown net debt → no bridge |
 | WACC constant | CAPM build with stated inputs and weights |
 | Concluded range averages the 52-week range and a revenue multiple on a margin outlier | Reference bars excluded; revenue multiple excluded when the margin is outside the peer IQR |
-| Multiples on the last fiscal year | LTM when a 10-Q allows, labelled; NTM still absent |
+| Multiples on the last fiscal year | LTM when a 10-Q allows and NTM from calendarised consensus, both labelled |
 
 Still open in both stacks: GAAP EBITDA without a consistent adjusted definition across peers; basic cover count used where a treasury-stock-method diluted count is wanted; P/E on GAAP EPS.
 
@@ -143,7 +143,7 @@ Yes, as stated, and more so after the re-run. The statistics were reproduced exa
 2. Port `Search` with document-level totals, multi-value filters and `date:` (items 5, 21), then `Analytics`, the API and the web UI; reload the real corpus with the fixed extractor and delete `argos/`.
 3. Add table-row and segment detection to KPI extraction and a period label on every tile (item 20) in `app/services/nlp.rb` and `ingest.rb`.
 4. Seed comp sets from the issuer's 10-K peer group and competitor mentions, and build a buyers list with ability-to-pay, in the `Pitchbooks` port.
-5. Add an NTM input (guidance or consensus) to `financials` as estimate rows and quote NTM EV/EBITDA beside LTM in `Valuation`.
+5. Render the NTM comps bar and the consensus source on the comps page when `Pitchbooks` is ported; add management guidance from the corpus as a second estimate source beside consensus.
 6. Run the conditioned backtest legs (margin-residual signal, sub-industry peers, an M&A incidence leg that keeps delisted names) in `app/services/backtest/runner.rb` before any deck language changes from "implied value" to anything stronger.
 7. Normalise EBITDA across peers (one stated policy on SBC and restructuring) and add a treasury-stock-method share count in `Sources::Sec` and `Valuation`.
 8. Stamp every deck with data, price and code dates and regenerate or remove the shipped Python deck and exports (item 22).
@@ -151,5 +151,5 @@ Yes, as stated, and more so after the re-run. The statistics were reproduced exa
 ## Open questions for the author
 
 * Should the product's "no debt line tagged" case be bridged at zero debt with a note (current) or excluded as the backtest does? The two stacks now differ deliberately; a single policy would be cleaner.
-* Is a consensus or guidance feed acceptable for NTM, or should NTM stay out until a licensed source exists?
+* Consensus now comes from the same public quote endpoint as the price (unofficial, unlicensed). Is that acceptable beyond internal use, or should a licensed estimates feed replace it before any deck leaves the building?
 * Which transcript source, if any, is in scope for the research terminal?
