@@ -42,8 +42,8 @@ Or step by step:
 ```bash
 bin/rails db:prepare          # schema, FTS index, 116 synthetic documents, 7 companies, 6 deals
 bin/rails server
-bin/rails "argos:load_sec['ITRI BMI XYL TRMB VNT ZBRA WTS','Smart Infrastructure & Measurement']"   # real data from EDGAR
-bin/rails "argos:pitchbook[ITRI,Project Meter,'BMI XYL TRMB VNT ZBRA WTS',pptx]"
+bin/rails "argos:load_sec[ITRI BMI XYL TRMB VNT ZBRA WTS,Smart Infrastructure & Measurement]"   # real data from EDGAR
+bin/rails "argos:pitchbook[ITRI,Project Meter,BMI XYL TRMB VNT ZBRA WTS,pptx]"
 bin/rails test                # 693 tests
 ```
 

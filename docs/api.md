@@ -80,19 +80,20 @@ Failures return `{"error": "..."}` with 400 (bad input), 404 (missing), 405
 
 ## Rake tasks
 
-The command line is `bin/rails "<task>[args]"`; lists inside one argument are
-space-separated because rake splits on commas, and flags are environment
-variables.
+The command line is `bin/rails "<task>[args]"`: quote the whole task for the
+shell, separate arguments with commas, and separate the tickers of one list
+with spaces (rake splits on commas). Surrounding quotes inside the brackets
+are stripped. Flags are environment variables.
 
 | Task | Notes |
 |---|---|
 | `argos:seed` | Load the synthetic demo dataset (idempotent) |
 | `argos:ingest[path]` | Ingest a file or directory of documents |
-| `argos:load_sec['ITRI BMI XYL',sector]` | Load real companies from EDGAR: financials (FY and LTM), consensus estimates and beta, latest balance sheet, quote, filings. `years=`, `annual=`, `quarterly=`, `press_releases=`, `no_documents=1` |
-| `argos:load_estimates['ITRI BMI']` | Refresh consensus rows and beta for loaded companies (all of them with no argument) |
+| `argos:load_sec[ITRI BMI XYL,sector]` | Load real companies from EDGAR: financials (FY and LTM), consensus estimates and beta, latest balance sheet, quote, filings. `years=`, `annual=`, `quarterly=`, `press_releases=`, `no_documents=1` |
+| `argos:load_estimates[ITRI BMI]` | Refresh consensus rows and beta for loaded companies (all of them with no argument) |
 | `argos:load_transactions[path]` | Precedent transactions from a CSV (`docs/precedent-transactions-template.csv`) |
 | `argos:search[query,limit]` | Run a research query; `json=1` prints JSON, `no_expand=1` disables synonyms |
-| `argos:pitchbook[ticker,title,'BMI XYL',format]` | Build a deck; `client=`, `banker=`, `out=` |
+| `argos:pitchbook[ticker,title,BMI XYL,format]` | Build a deck; `client=`, `banker=`, `out=` |
 | `argos:export[id,format,out]` | Export an existing deck (html, pdf, pptx) |
 | `argos:stats` | Corpus statistics as JSON |
 

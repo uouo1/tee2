@@ -37,7 +37,15 @@ module ArgosTasks
   # One argument holding several tickers: "ITRI BMI XYL" (commas cannot
   # survive rake's argument split; semicolons and plus signs are accepted too).
   def tickers(raw)
-    raw.to_s.split(/[\s,;+]+/).map { |t| t.strip.upcase }.reject(&:empty?)
+    raw.to_s.split(/[\s,;+'"]+/).map { |t| t.strip.upcase }.reject(&:empty?)
+  end
+
+  # A free-text argument with any shell-style quotes around it removed: rake
+  # keeps the quotes a caller wraps an argument in (argos:load_sec['A B',"S"]),
+  # and the loader once stored a sector named 'Smart Infrastructure' quotes
+  # included, and failed to resolve the ticker 'ITRI.
+  def text(raw)
+    raw.to_s.strip.sub(/\A(['"])(.*)\1\z/m, '\2').strip.presence
   end
 
   def print_json(payload)
@@ -140,7 +148,7 @@ namespace :argos do
 
     result = Sources::Sec.load_companies(
       tickers,
-      sector: args[:sector].presence,
+      sector: ArgosTasks.text(args[:sector]),
       years: ArgosTasks.env_int("years", 6),
       annual: ArgosTasks.env_int("annual", 1),
       quarterly: ArgosTasks.env_int("quarterly", 2),
@@ -188,7 +196,7 @@ namespace :argos do
 
   desc "Generate a pitch book: argos:pitchbook[NVG,'Project X','HLDX VLTR',html] (client=, banker=, out=)"
   task :pitchbook, %i[ticker title comps export] => :environment do |_task, args|
-    ticker = args[:ticker].to_s.strip
+    ticker = ArgosTasks.text(args[:ticker]).to_s
     ArgosTasks.fail_with(2, "usage: argos:pitchbook[ticker,title,comps,format]") if ticker.empty?
     fmt = args[:export].to_s.strip.downcase.presence
     comps = ArgosTasks.tickers(args[:comps]).presence
@@ -196,7 +204,7 @@ namespace :argos do
     book =
       begin
         Pitchbooks.create!(
-          title: args[:title].presence || "Project #{ticker.upcase}",
+          title: ArgosTasks.text(args[:title]) || "Project #{ticker.upcase}",
           target_ticker: ticker,
           comp_tickers: comps,
           client_name: ArgosTasks.env_value("client"),

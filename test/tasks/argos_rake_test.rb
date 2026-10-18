@@ -50,6 +50,14 @@ class ArgosRakeTest < ActiveSupport::TestCase
     FileUtils.rm_rf(@tmp)
   end
 
+  test "quotes around a ticker list or a sector are stripped, so argos:load_sec['A B','Sector'] works" do
+    assert_equal %w[ITRI BMI WTS], ArgosTasks.tickers("'ITRI BMI WTS'")
+    assert_equal %w[ITRI BMI], ArgosTasks.tickers('"ITRI,BMI"')
+    assert_equal "Smart Infrastructure & Measurement", ArgosTasks.text("'Smart Infrastructure & Measurement'")
+    assert_equal "Project Meter", ArgosTasks.text('"Project Meter"')
+    assert_nil ArgosTasks.text("  ")
+  end
+
   test "every task of the reference CLI is defined" do
     %w[argos:seed argos:ingest argos:load_sec argos:load_transactions argos:search argos:pitchbook
        argos:export argos:stats argos:load_estimates].each do |name|
