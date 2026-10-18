@@ -97,5 +97,13 @@ are stripped. Flags are environment variables.
 | `argos:export[id,format,out]` | Export an existing deck (html, pdf, pptx) |
 | `argos:stats` | Corpus statistics as JSON |
 
+Environment variables the tasks and the server honour: `ARGOS_DB` (another
+SQLite file for the development app, e.g. `storage/real.sqlite3` for a real
+corpus next to the demo; create it empty with `bin/rails db:schema:load`),
+`ARGOS_TEST_DB` (the same for the test environment), `ARGOS_HTTP_CACHE`
+(download cache, default `data/cache`), `ARGOS_EXPORT_DIR` (default
+`data/exports`; tests write under `tmp/exports`) and `ARGOS_USER_AGENT` (the
+SEC asks automated clients to identify themselves).
+
 Saved searches return `filters` as a JSON object (the Python reference returned
 the stored text).

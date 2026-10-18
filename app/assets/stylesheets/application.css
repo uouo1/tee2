@@ -331,6 +331,6 @@ tr.is-terminal td { border-top: 1px solid var(--axis); font-weight: 600; }
 table.wacc-build td:first-child { color: var(--text-secondary); }
 table.dcf-projections { font-variant-numeric: tabular-nums; }
 .note.pills { display: flex; flex-wrap: wrap; gap: 6px 10px; }
-.stale-warning { background: color-mix(in srgb, var(--warning, #c47a00) 10%, transparent); }
+.stale-warning { background: color-mix(in srgb, var(--warning) 10%, transparent); }
 label.chip { cursor: pointer; }
 label.chip input[type="checkbox"] { position: absolute; opacity: 0; width: 0; height: 0; }

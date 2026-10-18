@@ -311,10 +311,16 @@ JSON API at `/api/...` with the **same paths and response keys** as `docs/api.md
 ## Phase plan and file ownership — status
 
 Phase A (services) and Phase B (Pitchbooks + deck partials + Exporters::Html,
-the web UI, the JSON API and rake tasks) are ported and green: 693 tests,
-5,275 assertions across the whole suite on 17 October 2026. Phase C
-(integration, server run, screenshots) is done; the adversarial review of the
-port and the retirement of the Python tree follow.
+the web UI, the JSON API and rake tasks) are ported and green: 694 tests,
+5,280 assertions across the whole suite on 18 October 2026. Phase C
+(integration, server run, screenshots) is done. On 18 October the real-data
+tutorial was regenerated on the Rails build (`ARGOS_DB=storage/real.sqlite3`
+points the development app at a separate file; `TUTORIAL.md` and
+`docs/images/real-*.png` now show the Rails pages) and the Python and Rails
+builds were checked against each other on that corpus: identical passage
+counts (10,739 from 49 filings), identical Itron valuation to the cent. The
+Python tree stays as the reference implementation; its removal is a separate
+decision once the adversarial review of the port has closed.
 
 Integration notes: the formatting helpers live in
 `DashboardController::Formatting` (every view controller includes it);
@@ -338,7 +344,9 @@ a regression test for it; porting the Python behaviour verbatim is wrong here.
    must keep a stack of (tag name, hidden?) and un-hide only when the *same*
    tag that opened the hidden block closes. Test: a hidden `<span>` followed by a
    visible `<p>` keeps the paragraph; a 10-Q-sized fixture retains > 80% of its
-   visible words.
+   visible words. (Back-ported to the Python converter on 18 October 2026 with
+   the same tests; on Itron's June 2026 10-Q both now produce the same 177,759
+   characters where the old converter kept 4,632.)
 2. **Share count.** Store diluted weighted-average shares in `shares_diluted`
    and the cover-page count in `shares_basic` (already in the contract). The
    company page and the comps table label which was used.

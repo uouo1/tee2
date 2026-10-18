@@ -193,6 +193,61 @@ class HtmlTextTests(unittest.TestCase):
         self.assertNotIn("alert", text)
         self.assertNotIn("<p>", text)
 
+    def test_a_hidden_span_does_not_swallow_the_paragraphs_that_follow_it(self):
+        text = html_to_text(
+            '<span style="display:none">hidden fact</span><p>Revenue rose 12% this quarter.</p>'
+            '<div><p>Backlog was $4.4 billion.</p></div>'
+        )
+        self.assertIn("Revenue rose 12%", text)
+        self.assertIn("Backlog was $4.4 billion", text)
+        self.assertNotIn("hidden fact", text)
+
+    def test_a_hidden_block_ends_when_its_own_tag_closes_even_with_nested_copies(self):
+        text = html_to_text('<div style="display:none"><div>inner</div>still hidden</div><p>Visible after.</p>')
+        self.assertNotIn("inner", text)
+        self.assertNotIn("still hidden", text)
+        self.assertIn("Visible after.", text)
+
+    def test_a_hidden_void_tag_does_not_hide_the_rest_of_the_document(self):
+        text = html_to_text('<br style="display:none"><p>Still visible.</p>')
+        self.assertIn("Still visible.", text)
+
+    def test_an_unclosed_hidden_span_ends_with_the_element_that_contains_it(self):
+        # The stack holds every open element, so closing the cell closes the span
+        # inside it, as a browser would; the next cell is content again.
+        text = html_to_text(
+            '<table><tr><td><span style="display:none">hidden fact</td><td>Visible cell text.</td></tr></table>'
+            '<p>Visible paragraph.</p>'
+        )
+        self.assertNotIn("hidden fact", text)
+        self.assertIn("Visible cell text.", text)
+        self.assertIn("Visible paragraph.", text)
+
+    def test_hidden_table_cells_do_not_truncate_the_filing(self):
+        # Inline-XBRL statements carry hidden <td> cells; the earlier converter
+        # counted each one as an open hidden block that only a </div> could
+        # close, so everything after the first financial table was lost.
+        cells = "".join('<td style="display:none">x</td>' for _ in range(8))
+        markup = (
+            "<p>Before the table.</p>"
+            f"<table><tr>{cells}<td>Net income</td><td>53,473</td></tr></table>"
+            "<p>Total bookings and backlog include certain contracts.</p>"
+            "<div><p>Risk factors follow.</p></div>"
+        )
+        text = html_to_text(markup)
+        self.assertIn("Net income", text)
+        self.assertIn("Total bookings and backlog", text)
+        self.assertIn("Risk factors follow.", text)
+        self.assertNotIn("x", text.replace("Risk factors", "").replace("table", "").replace("Net income", ""))
+
+    def test_a_stray_close_tag_and_hidden_markup_inside_skipped_elements_are_harmless(self):
+        text = html_to_text('</div></span><noscript><div style="display:none">x</noscript><p>Shown anyway.</p>')
+        self.assertEqual("Shown anyway.", text)
+
+    def test_whitespace_only_spans_keep_words_apart(self):
+        text = html_to_text("<p><span>the</span><span> </span><span>FASB</span></p>")
+        self.assertIn("the FASB", text)
+
     def test_wrapped_lines_are_rejoined_into_paragraphs(self):
         text = html_to_text("<div>Revenue grew because</div><div>demand was strong.</div><div>Next item.</div>")
         self.assertIn("Revenue grew because demand was strong.", text)

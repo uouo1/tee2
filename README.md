@@ -24,10 +24,12 @@ the export menu.
 > (`docs/AUDIT.md`) found valuation defects in it; those are now fixed in both
 > stacks (latest-balance-sheet net debt with non-controlling interest, LTM and
 > consensus NTM multiples, a built-up WACC, corrected DCF mechanics, a
-> concluded range that excludes reference bars, data-driven slide prose). Two
-> gaps remain in this build only: the PowerPoint and PDF writers do not yet
-> render the new slide blocks (the HTML export does), and search totals keep a
-> ranking artefact the Rails port corrects. Read `docs/AUDIT.md` first.
+> concluded range that excludes reference bars, data-driven slide prose), and
+> since 18 October so is the text extractor that had dropped most of every
+> 10-Q. Two gaps remain in this build only: the PowerPoint and PDF writers do
+> not yet render the new slide blocks (the HTML export does), and search totals
+> keep a ranking artefact the Rails port corrects. Read `docs/AUDIT.md` first;
+> the real-data walkthrough in `TUTORIAL.md` runs on the Rails build.
 
 ## Quick start (Ruby on Rails)
 
@@ -44,8 +46,15 @@ bin/rails db:prepare          # schema, FTS index, 116 synthetic documents, 7 co
 bin/rails server
 bin/rails "argos:load_sec[ITRI BMI XYL TRMB VNT ZBRA WTS,Smart Infrastructure & Measurement]"   # real data from EDGAR
 bin/rails "argos:pitchbook[ITRI,Project Meter,BMI XYL TRMB VNT ZBRA WTS,pptx]"
-bin/rails test                # 693 tests
+bin/rails test                # 694 tests
 ```
+
+To keep real data apart from the demo corpus, point the development app at
+another file: `ARGOS_DB=storage/real.sqlite3 bin/rails db:schema:load` creates
+it empty, and every `bin/rails` command honours the same variable.
+**[TUTORIAL.md](TUTORIAL.md) walks through a full real-data session** — from
+an empty database to an exported Itron pitch book — and explains what every
+number on the valuation page is made of.
 
 PowerPoint and PDF export need no extra install: the writers are Ruby (rubyzip,
 prawn). The rake tasks are listed in `docs/api.md`; the HTTP API is the same
@@ -56,8 +65,9 @@ one the web pages use.
 The original stdlib-only Python implementation is still in `argos/` (run with
 `./run.sh` or `python3 -m argos serve`, port 8787, `pip install -r
 requirements.txt` for PowerPoint and PDF). It carries the same audited fixes as
-the Rails services and is kept as the reference until the Rails build has been
-through its own adversarial review, after which it is removed.
+the Rails services, produces the same corpus and the same valuation on the
+tutorial's data, and is kept as the reference implementation; removing it is a
+separate decision once the Rails build's adversarial review has closed.
 
 Requires Python 3.11 or newer. Nothing else is needed for search, valuation,
 the web UI or HTML export.
@@ -175,9 +185,8 @@ range, and the latest 10-K, two 10-Qs and four 8-K earnings releases as a
 searchable corpus. Downloads are cached under `data/cache/` and ingest is
 idempotent, so re-running is cheap.
 
-**[TUTORIAL.md](TUTORIAL.md) walks through a full real-data session** — from an
-empty database to an exported Itron pitch book — and explains what every number
-on the valuation page is made of.
+`TUTORIAL.md` runs this session on the Rails build and ends with the Python
+equivalents.
 
 Precedent transactions are the one input EDGAR cannot supply in machine-readable
 form; load your own with `argos load-transactions deals.csv` (template in

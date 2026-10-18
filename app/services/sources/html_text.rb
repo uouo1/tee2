@@ -203,10 +203,11 @@ module Sources
         @skip_depth = 0
         # Open elements as [tag, hidden?], outermost first, plus a count of the
         # hidden ones so the common path is a single comparison. The reference
-        # kept one counter and decremented it on any </div>, so a hidden <span>
-        # swallowed the rest of a 10-Q (10 of 14 real filings kept under 10% of
-        # their text). Un-hiding only when the tag that opened the hidden block
-        # closes keeps the paragraph after it.
+        # once kept one counter and decremented it on any </div>, so a hidden
+        # <span> or <td> swallowed the rest of a 10-Q (10 of 14 real filings
+        # kept under 10% of their text; this logic is now in both builds).
+        # Un-hiding only when the tag that opened the hidden block closes keeps
+        # the paragraph after it.
         @stack = []
         @hidden = 0
       end

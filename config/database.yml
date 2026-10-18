@@ -11,7 +11,8 @@ default: &default
 
 development:
   <<: *default
-  database: storage/development.sqlite3
+  # ARGOS_DB points the development app at another file, e.g. a real-data corpus.
+  database: <%= ENV.fetch("ARGOS_DB", "storage/development.sqlite3") %>
 
 # Warning: The database defined as "test" will be erased and
 # re-generated from your development database when you run "rake".

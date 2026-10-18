@@ -7,45 +7,53 @@ searchable corpus of 49 real filings and an exported pitch book for Itron,
 Inc. (NASDAQ: ITRI) — and, more usefully, you will know what every number on
 its valuation page is made of.
 
-Everything below was run on 12–13 October 2026. Prices move and companies file,
-so your figures will differ in detail; the shape of the exercise will not.
+The session was first run on 12–13 October 2026 and regenerated on 18 October
+2026 on the Rails build with 16 October prices. Prices move and companies
+file, so your figures will differ in detail; the shape of the exercise will
+not.
 
-> **Revised 17 October 2026 after an independent audit** (`docs/AUDIT.md`).
-> The first version of this tutorial bridged the valuation through a net-debt
-> figure from the December 2025 10-K, quoted multiples on fiscal 2025, used a
-> constant WACC and described a peer-multiple range as "upside". The loader and
-> the valuation now use the latest 10-Q balance sheet, LTM and consensus NTM
-> figures, a built-up WACC and a conclusion that excludes reference bars, and
-> every figure below was regenerated with that code on 16–17 October 2026
-> prices. One known artefact remains in this Python build: broad search counts
-> can be lower than their facets (the Rails port corrects it).
+> **Revised after an independent audit** (`docs/AUDIT.md`). The first version
+> of this tutorial bridged the valuation through a net-debt figure from the
+> December 2025 10-K, quoted multiples on fiscal 2025, used a constant WACC and
+> described a peer-multiple range as "upside". The loader and the valuation now
+> use the latest 10-Q balance sheet, LTM and consensus NTM figures, a built-up
+> WACC and a conclusion that excludes reference bars. The audit also found that
+> the first text extractor kept under 10% of most 10-Qs: a hidden table cell
+> switched it off and nothing switched it back on. Both builds now read the
+> whole filing (Itron's June 10-Q is 178,000 characters, not 4,600), which is
+> why the passage and search counts below are roughly double the first
+> version's.
 
 > **Data sources.** Fundamentals and filings come from SEC EDGAR's public APIs
-> (`data.sec.gov`, `sec.gov/Archives`). The quote comes from a public quote
-> endpoint. Neither is a licensed data feed: fine for learning and for internal
-> work, not something to redistribute as a product. SEC asks automated clients
-> to identify themselves — set `ARGOS_USER_AGENT="YourName your@email"` before
-> loading at any volume.
+> (`data.sec.gov`, `sec.gov/Archives`). The quote, consensus and beta come from
+> a public quote endpoint. Neither is a licensed data feed: fine for learning
+> and for internal work, not something to redistribute as a product. SEC asks
+> automated clients to identify themselves — set
+> `ARGOS_USER_AGENT="YourName your@email"` before loading at any volume.
 
 ---
 
-## 0. Setup (two minutes)
+## 0. Setup (five minutes)
 
 ```bash
 git clone -b claude/alpha-sense-pitch-book-7wu8xc https://github.com/uouo1/tee2.git
 cd tee2
-pip install -r requirements.txt     # optional: only for PowerPoint and PDF export
-python3 -m unittest discover -s tests -t .
+bin/setup --skip-server       # bundle install, then db:prepare with the demo corpus
+bin/rails test                # 694 runs
 ```
 
-Argos needs nothing beyond Python 3.11+ for search, valuation, the web UI and
-HTML export. The suite should report `OK`.
+Argos is a Rails 8.1 application on Ruby 3.3 and SQLite (FTS5 for search).
+PowerPoint and PDF export need nothing beyond the bundle.
 
-We will keep the real data in its own database file so the synthetic demo
-corpus (`argos seed`) stays available for comparison:
+`bin/setup` seeds `storage/development.sqlite3` with the synthetic demo
+corpus. We will keep the real data in its own database file so the demo stays
+available for comparison. `ARGOS_DB` points the development app at another
+file; `db:schema:load` creates it empty (where `db:prepare` would seed the
+demo corpus into it):
 
 ```bash
-export ARGOS_DB=data/real.db
+export ARGOS_DB=storage/real.sqlite3
+bin/rails db:schema:load
 ```
 
 ---
@@ -56,30 +64,32 @@ Itron sells smart meters and grid-edge software to utilities. A defensible
 trading-comp set is companies that sell measurement and control technology into
 utility and industrial customers: Badger Meter (BMI), Xylem (XYL), Trimble
 (TRMB), Vontier (VNT), Zebra Technologies (ZBRA) and Watts Water (WTS). All are
-SEC filers, so one command loads all of them:
+SEC filers, so one command loads all of them (rake splits task arguments on
+commas, so the ticker list is space-separated and the whole task name is
+quoted for the shell):
 
 ```bash
-python3 -m argos load-sec ITRI BMI XYL TRMB VNT ZBRA WTS \
-    --sector "Smart Infrastructure & Measurement"
+bin/rails "argos:load_sec[ITRI BMI XYL TRMB VNT ZBRA WTS,Smart Infrastructure & Measurement]"
 ```
 
 Three minutes later (downloads are cached under `data/cache/`, so a re-run takes
-seconds):
+about thirty seconds):
 
 ```json
 {
-  "companies": 7,
-  "documents_added": 49,
-  "failures": [],
   "loaded": [
     {"ticker": "ITRI", "name": "Itron, Inc.", "cik": "0000780571",
      "fiscal_years": [2020, 2021, 2022, 2023, 2024, 2025],
      "latest_revenue": 2367.2, "ltm_period_end": "2026-06-30",
      "shares_basis": "weighted_diluted", "net_debt_as_of": "2026-06-30",
-     "estimate_years": [2026, 2027], "share_price": 83.04,
-     "quote_as_of": "2026-10-16", "documents_added": 7},
+     "estimate_years": [2026, 2027], "beta": 1.321,
+     "share_price": 83.04, "quote_as_of": "2026-10-16",
+     "documents_added": 7, "documents_skipped": 0},
     ...
-  ]
+  ],
+  "failures": [],
+  "companies": 7,
+  "documents_added": 49
 }
 ```
 
@@ -90,8 +100,9 @@ number came from where, because that is what makes the deck defensible later.
 
 **1. Resolved the company.** `sec.gov/files/company_tickers.json` maps ITRI to
 CIK 780571. The submissions feed supplies the legal name, SIC code and business
-address. `--sector` overrides the SIC description with one label for the whole
-set, which is what the comp-suggestion and precedent-transaction screens key on.
+address. The second task argument overrides the SIC description with one sector
+label for the whole set, which is what the comp-suggestion and
+precedent-transaction screens key on.
 
 **2. Pulled six years of fundamentals from XBRL**, not from parsed text. The
 `companyfacts` API carries every tagged value the company ever filed. The loader
@@ -153,22 +164,22 @@ recent 10-Qs and the four most recent 8-K earnings releases (the loader finds
 the EX-99.1 exhibit inside each 8-K; filers name that file every way
 imaginable). Each document is converted from inline-XBRL HTML to paragraphs,
 chunked, scored for tone, scanned for KPIs and indexed in FTS5. The 49 documents
-became 5,220 searchable passages and 133 extracted metrics.
+became 10,739 searchable passages and 407 extracted metrics.
 
 Check the result:
 
 ```bash
-python3 -m argos stats
+bin/rails argos:stats
 ```
 
 ---
 
 ## 2. Research the target
 
-Start the application on the real database and open <http://127.0.0.1:8787>:
+Start the application on the real database and open <http://127.0.0.1:3000>:
 
 ```bash
-python3 -m argos serve
+bin/rails server
 ```
 
 ![Dashboard on real data](docs/images/real-dashboard.png)
@@ -179,30 +190,40 @@ Go to **Research** and search `backlog ticker:ITRI`.
 
 ![Backlog search](docs/images/real-research.png)
 
-Four documents match. The summary card at the top has done the first hour of an
-analyst's work: it has pulled, from three consecutive earnings releases, the
-sentences that carry the number —
+Six documents match: the three earnings releases that carry the number, and
+the 10-K and both 10-Qs that carry its caveat. The summary card at the top has
+done the first hour of an analyst's work — it has pulled the sentences that
+matter and cited each one:
 
-> Backlog at quarter end was $4.5 billion compared with $4.7 billion in the prior year. *(8-K, 17 Feb 2026)*
-> Backlog at quarter end was $4.4 billion compared with $4.7 billion in the prior year. *(8-K, 28 Apr 2026)*
+> Total bookings and backlog include certain contracts with a termination for convenience clause, which will not agree to the total transaction price allocated to the remaining performance obligations … *(10-Q, 28 Jul 2026)*
 > Backlog at quarter end was $4.4 billion compared with $4.5 billion in the prior year. *(8-K, 28 Jul 2026)*
+> Backlog at quarter end was $4.4 billion compared with $4.7 billion in the prior year. *(8-K, 28 Apr 2026)*
+> Backlog at quarter end was $4.5 billion compared with $4.7 billion in the prior year. *(8-K, 17 Feb 2026)*
 
-— and, from the 10-K, the caveat that backlog includes contracts with
-termination-for-convenience clauses. That is the research finding and its
-footnote, each traceable to an accession number.
+That is the research finding and its footnote, each traceable to an accession
+number.
 
 Notice the line under the result count: `matched on ("backlog" OR "rpo" OR
 "remaining performance obligations" OR "order book")`. Synonym expansion is on
 by default because filings and analysts use different words for the same
 thing; untick **Expand synonyms** to see only literal matches.
 
-Try a few more. `tariff` lists 15 documents across the set (its facet counts
-28: this Python build ranks a top slice of passages before collapsing to
-documents, an artefact the Rails port removes) — Watts, Badger Meter and Xylem
-all discuss reciprocal tariffs and the Supreme Court case in their 2026 10-Qs. `margin expansion type:press-release` surfaces Vontier's
-guidance language ("adjusted operating profit margin expansion of approximately
-110 basis points"). `"data center" OR datacenter` shows Badger Meter attributing
-component demand to hyperscale build-out.
+Try a few more. `tariff` lists 37 documents across all seven companies, and
+the facet counts on the left add up to the same 37 — Watts, Vontier, Badger
+Meter and Xylem all discuss reciprocal tariffs and the Supreme Court's IEEPA
+ruling in their 2026 10-Qs. `margin expansion type:press-release` surfaces
+Vontier's guidance language ("adjusted operating profit margin expansion of
+approximately 110 basis points"). `"data center" OR datacenter` shows Badger
+Meter attributing component demand to hyperscale build-out and Watts crediting
+data-center growth for its Americas sales.
+
+The same searches run from the command line, which is how they go into a
+pipeline:
+
+```bash
+bin/rails "argos:search[backlog ticker:ITRI,5]"
+json=1 bin/rails "argos:search[tariff,10]"        # raw JSON, facets included
+```
 
 Click any result: the reader on the right shows the whole document, the metrics
 parsed from it, per-passage tone, nearest-neighbour filings, and a **Pin to
@@ -218,21 +239,23 @@ Tiles show the live capital structure — $83.04, market cap $3.8bn, EV $4.7bn
 (net debt dated 30 June 2026), 12.8x LTM Jun-26 EV/EBITDA and 11.7x NTM,
 15.9% LTM margin. The revenue chart shows the FY2021–22 trough and recovery;
 the margin chart shows the expansion from 4% to 15% that is the whole Itron
-equity story, with the consensus years shaded as estimates. Under the tiles a
-line says which share count the per-share figures rest on. Below are the KPIs extracted from narrative text (gross
-margin observed 24 times, backlog five times, free cash flow six) with the
-sentence each came from.
+equity story, with the consensus years shaded as estimates. Under the tiles the
+EV bridge lists each claim with its balance-sheet date, and a line says which
+share count the per-share figures rest on. Below are the KPIs extracted from
+narrative text (gross margin observed 73 times, backlog nine times, free cash
+flow six) with the sentence each came from.
 
 ---
 
 ## 3. Generate the pitch book
 
-From the company page, **Generate deck**, or from the command line:
+From the company page, **Generate deck**, or from the command line (the client
+and banker names are environment variables, because rake arguments cannot hold
+a comma):
 
 ```bash
-python3 -m argos pitchbook ITRI --title "Project Meter" \
-    --client "Board of Itron, Inc." --banker "Argos Advisory" \
-    --comps BMI,XYL,TRMB,VNT,ZBRA,WTS --export pptx
+client="Board of Itron, Inc." banker="Argos Advisory" \
+    bin/rails "argos:pitchbook[ITRI,Project Meter,BMI XYL TRMB VNT ZBRA WTS,pptx]"
 ```
 
 ```
@@ -251,11 +274,11 @@ pitchbook 1: Project Meter — 14 slides
   11  buyers                 Potential counterparties
   12  process                Process considerations and next steps
   13  evidence_appendix      Appendix — sources and evidence
-exported: data/exports/pitchbook-1.pptx
+exported: /home/user/tee2/data/exports/pitchbook-1.pptx
 ```
 
 Open **Pitch books** in the UI to read it. The executive summary quotes the
-corpus — the three backlog sentences above appear with their document ids — and
+corpus — the backlog sentences above appear with their document ids — and
 the market overview is the theme model run across the whole set.
 
 ![Executive summary](docs/images/real-execsummary.png)
@@ -322,7 +345,7 @@ so a comps bar is a statement about relative pricing, not a forecast.
 The comps bars sit above the current price while the DCF sits below it. That
 is not a bug; it is the finding. Itron trades at 12.8x LTM EBITDA against a
 peer interquartile range of 15.3x–19.9x because its margin (15.9%) is the
-lowest in the group — the executive summary now says exactly that, "below the
+lowest in the group — the executive summary says exactly that, "below the
 peer median of 21.1% across 6 peers", and the counterparties slide quotes each
 peer's margin and multiple against Itron's instead of calling every peer
 accretive. A comps-driven view says "re-rate to the peers"; a cash-flow view,
@@ -345,8 +368,8 @@ summary omits the precedent bar rather than inventing one. When you have a
 transaction screen, load it:
 
 ```bash
-python3 -m argos load-transactions deals.csv
-python3 -m argos export 1 --format pptx      # or Rebuild in the UI
+bin/rails "argos:load_transactions[deals.csv]"
+bin/rails "argos:export[1,pptx]"             # or Rebuild in the UI
 ```
 
 with the columns in `docs/precedent-transactions-template.csv`
@@ -374,15 +397,16 @@ back half.
 From the deck toolbar, or:
 
 ```bash
-python3 -m argos export 1 --format pptx --out project-meter.pptx
-python3 -m argos export 1 --format pdf  --out project-meter.pdf
-python3 -m argos export 1 --format html --out project-meter.html
+bin/rails "argos:export[1,pptx,project-meter.pptx]"
+bin/rails "argos:export[1,pdf,project-meter.pdf]"
+bin/rails "argos:export[1,html,project-meter.html]"
 ```
 
 The PowerPoint charts are native, editable chart objects — the football field
 is a stacked bar with an invisible base series, exactly as you would build it
 by hand — so a banker can retype a number at 11pm without coming back to the
-application. The HTML is a single self-contained file that prints to PDF.
+application. The HTML is a single self-contained file that prints to PDF. Every
+export carries a stamp with the data, price and code dates it was built from.
 
 ---
 
@@ -393,9 +417,12 @@ and only the new 8-K is ingested; rebuild the deck and the executive summary
 picks up the new backlog figure:
 
 ```bash
-python3 -m argos load-sec ITRI BMI XYL TRMB VNT ZBRA WTS --sector "Smart Infrastructure & Measurement"
-curl -X POST http://127.0.0.1:8787/api/pitchbooks/1/rebuild
+bin/rails "argos:load_sec[ITRI BMI XYL TRMB VNT ZBRA WTS,Smart Infrastructure & Measurement]"
+curl -X POST http://127.0.0.1:3000/api/pitchbooks/1/rebuild
 ```
+
+Consensus and beta can be refreshed on their own, without touching the
+filings: `bin/rails "argos:load_estimates[ITRI BMI XYL TRMB VNT ZBRA WTS]"`.
 
 Save the backlog search (**Save this search**) and the **Monitor** tab will
 list new matches each time you load.
@@ -427,9 +454,10 @@ and you should know them before you put a number in front of anyone.
   Between filings it is stale by up to a quarter; a convertible issued since
   the last balance sheet is not in it until the next 10-Q.
 * **Theme detection on filing text is noisy.** Earnings releases carry the
-  signal ("tariff refunds", "Middle East conflict" rose in the last 180 days);
-  10-Q boilerplate is filtered but not perfectly. Treat the market-overview
-  theme table as a prompt for reading, not a conclusion.
+  signal ("tariff refunds" is the second theme on the dashboard); 10-Q
+  boilerplate ("normal recurring", "opinion management") is filtered but not
+  perfectly, and with the full 10-Q text indexed there is more of it. Treat the
+  market-overview theme table as a prompt for reading, not a conclusion.
 * **The quote is a public endpoint**, unlicensed and occasionally unavailable.
   If a company loads with no market data, re-run; the fundamentals and filings
   are unaffected.
@@ -445,12 +473,31 @@ and you should know them before you put a number in front of anyone.
 ## Reproduce exactly
 
 ```bash
-export ARGOS_DB=data/real.db ARGOS_USER_AGENT="Your Name your@email.example"
-python3 -m argos load-sec ITRI BMI XYL TRMB VNT ZBRA WTS --sector "Smart Infrastructure & Measurement"
-python3 -m argos pitchbook ITRI --title "Project Meter" --client "Board of Itron, Inc." \
-    --banker "Argos Advisory" --comps BMI,XYL,TRMB,VNT,ZBRA,WTS --export pptx
-python3 -m argos serve
+export ARGOS_DB=storage/real.sqlite3 ARGOS_USER_AGENT="Your Name your@email.example"
+bin/rails db:schema:load
+bin/rails "argos:load_sec[ITRI BMI XYL TRMB VNT ZBRA WTS,Smart Infrastructure & Measurement]"
+client="Board of Itron, Inc." banker="Argos Advisory" \
+    bin/rails "argos:pitchbook[ITRI,Project Meter,BMI XYL TRMB VNT ZBRA WTS,pptx]"
+bin/rails server
 ```
 
 The HTTP API (`docs/api.md`) exposes everything the UI does, so the same session
 can be scripted end to end.
+
+### The same session on the Python reference build
+
+The original stdlib-only implementation in `argos/` runs the same session with
+the same figures (the two builds were checked against each other on this
+corpus: identical passage counts, identical valuation to the cent). It keeps
+one artefact the Rails build removed — broad search totals can be lower than
+their facet counts — and its PowerPoint and PDF writers do not yet print the
+WACC build, terminal-year row or basis labels that the HTML export and the
+Rails exports do.
+
+```bash
+export ARGOS_DB=data/real.db ARGOS_USER_AGENT="Your Name your@email.example"
+python3 -m argos load-sec ITRI BMI XYL TRMB VNT ZBRA WTS --sector "Smart Infrastructure & Measurement"
+python3 -m argos pitchbook ITRI --title "Project Meter" --client "Board of Itron, Inc." \
+    --banker "Argos Advisory" --comps BMI,XYL,TRMB,VNT,ZBRA,WTS --export pptx
+python3 -m argos serve                       # http://127.0.0.1:8787
+```
